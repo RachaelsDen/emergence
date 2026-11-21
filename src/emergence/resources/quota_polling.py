@@ -19,6 +19,7 @@ from emergence.storage.models import requests
 from emergence.storage.repositories import ArchiveReferenceConflict
 from emergence.telemetry.logging import Redactor
 
+from .reporting_credentials import reporting_credential
 from .reporting_http import ReportingHTTP
 from .reporting_openai import OpenAIAdmin
 from .reporting_parsers import WireObject, parse_minimax, parse_zai
@@ -86,22 +87,6 @@ class QuotaMonitor:
             failures = min(failures + 1, 4) if failed else 0
             await sleep(interval * 2**failures * uniform(0.9, 1.1))
 
-    def _credential(self, config: ProviderConfig, now: datetime) -> str:
-        if config.reporting_key_expires_at is not None and now >= config.reporting_key_expires_at:
-            raise ReportingError(ReportingIssue.EXPIRED_CREDENTIAL)
-        name = config.reporting_credential_env
-        if config.kind is not ProviderKind.OPENAI and name is None:
-            name = config.credential_env
-        secret = self._settings.secret(name)
-        if secret is None:
-            raise ReportingError(ReportingIssue.MISSING_CREDENTIAL)
-        if config.kind is ProviderKind.OPENAI and any(
-            secret == self._settings.secret(provider.credential_env)
-            for provider in self._settings.providers.values()
-        ):
-            raise ReportingError(ReportingIssue.SHARED_CREDENTIAL)
-        return secret.get_secret_value()
-
     async def _failure(
         self,
         name: str,
@@ -163,7 +148,7 @@ class QuotaMonitor:
         assert url is not None  # The unsupported path above has already returned.
         pages: tuple[WireObject, ...] = ()
         try:
-            credential = self._credential(config, now)
+            credential = reporting_credential(self._settings, config, now)
             raw, _ = await http.get(url, headers={"Authorization": f"Bearer {credential}"})
             pages = (raw,)
             redactor = Redactor(self._settings.secrets())
@@ -205,7 +190,7 @@ class QuotaMonitor:
     ) -> tuple[QuotaObservation, ...]:
         redactor = Redactor(self._settings.secrets())
         try:
-            credential = self._credential(config, now)
+            credential = reporting_credential(self._settings, config, now)
             org, project = config.organization, config.project
             if (
                 not org
