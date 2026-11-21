@@ -27,11 +27,13 @@ class ReportingHTTP:
         body = bytearray()
         limit = self.limit if remaining is None else remaining
         try:
+            request_headers = httpx.Headers(headers)
+            request_headers["Accept-Encoding"] = "identity"
             with fail_after(self.timeout):
                 async with self.client.stream(
                     "GET",
                     url,
-                    headers=headers,
+                    headers=request_headers,
                     params=tuple(params),
                     auth=None,
                     follow_redirects=False,
@@ -46,10 +48,21 @@ class ReportingHTTP:
                             raise ReportingError(ReportingIssue.HTTP_ERROR)
                         case _:
                             pass
-                    async for chunk in response.aiter_bytes(chunk_size=64 * 1024):
+                    if response.headers.get("content-encoding", "identity").strip().lower() != (
+                        "identity"
+                    ):
+                        raise ReportingError(ReportingIssue.TRANSPORT)
+
+                    def append(chunk: bytes) -> None:
                         if len(body) + len(chunk) > limit:
                             raise ReportingError(ReportingIssue.TOO_LARGE)
                         body.extend(chunk)
+
+                    if response.is_stream_consumed:
+                        append(response.content)
+                    else:
+                        async for chunk in response.aiter_raw():
+                            append(chunk)
         except (TimeoutError, httpx.TimeoutException):
             raise ReportingError(ReportingIssue.TIMEOUT) from None
         except (httpx.RequestError, httpx.InvalidURL, UnicodeError, ValueError):

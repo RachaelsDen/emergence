@@ -23,7 +23,7 @@ from emergence.storage.models import (
 from emergence.telemetry.logging import Redactor
 
 from .audit import record_audit
-from .budgets import AdjustmentReceipt, projection
+from .budgets import AdjustmentReceipt, find_period, month, period, projection
 from .budgets import BudgetBalance as BudgetBalance
 from .pricing import BudgetError as BudgetError
 from .pricing import check_money, effective, install_prices, rates, stamp, version_key
@@ -66,7 +66,8 @@ class BudgetLedger:
             model.max_input_tokens, request.max_output_tokens
         )
         check_money(amount)
-        balance = await projection(session, self.settings, request.provider, now)
+        current = await period(session, self.settings, request.provider, now)
+        balance = await projection(session, self.settings, request.provider, current)
         if balance.available is None or balance.period_id is None:
             raise BudgetError("budget_missing")
         with localcontext(prec=2048):
@@ -187,8 +188,21 @@ class BudgetLedger:
         await account.charge(session, amount, TokenUsage(), now)
 
     async def balance(self, provider: str, at: datetime | None = None) -> BudgetBalance:
+        config = self.settings.providers.get(provider)
+        if config is None:
+            raise BudgetError("unknown_provider")
+        if config.kind == ProviderKind.LLAMACPP:
+            return BudgetBalance(provider=provider, enforcement_mode="local")
+        now = at or datetime.now(UTC)
+        start, end = month(now, self.settings.accounting_timezone)
+        async with self.database.session() as session:
+            if (current := await find_period(session, provider, start, end)) is not None:
+                return await projection(session, self.settings, provider, current)
+        # Recheck under the writer in case another request opened the period.
         async with self.database.write() as session:
-            return await projection(session, self.settings, provider, at or datetime.now(UTC))
+            current = await period(session, self.settings, provider, now)
+        async with self.database.session() as session:
+            return await projection(session, self.settings, provider, current)
 
     async def adjust(
         self,
@@ -233,22 +247,26 @@ class BudgetLedger:
                 if existing.action != json.dumps([action, existing.reason]):
                     raise BudgetError("adjustment_idempotency_conflict")
                 bound = self.settings.model_copy(update={"accounting_timezone": existing.timezone})
-                balance = await projection(
+                current = await period(
                     session, bound, provider, datetime.fromisoformat(existing.occurred_at)
                 )
+                balance = await projection(session, bound, provider, current)
                 return AdjustmentReceipt(
                     **balance.model_dump(), adjustment_id=identity, replayed=True
                 )
-            balance = await projection(session, self.settings, provider, now)
-            if balance.period_id is None:
+            config = self.settings.providers.get(provider)
+            if config is None:
+                raise BudgetError("unknown_provider")
+            if config.kind == ProviderKind.LLAMACPP:
                 raise BudgetError("no_dollar_budget")
+            current = await period(session, self.settings, provider, now)
             aid = await record_audit(
                 session, self._redactor, provider, None, now, actor, action, reason
             )
             await session.execute(
                 budget_adjustments.insert().values(
                     id=identity,
-                    budget_period_id=balance.period_id,
+                    budget_period_id=current.id,
                     amount_delta=amount,
                     kind=kind,
                     reason=self._redactor.text(reason.strip()),
@@ -256,5 +274,5 @@ class BudgetLedger:
                     occurred_at=stamp(now),
                 )
             )
-            balance = await projection(session, self.settings, provider, now)
+            balance = await projection(session, self.settings, provider, current)
             return AdjustmentReceipt(**balance.model_dump(), adjustment_id=identity, replayed=False)

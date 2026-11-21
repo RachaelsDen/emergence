@@ -4,7 +4,7 @@ import json
 from collections import defaultdict
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, localcontext
-from typing import Literal
+from typing import Literal, NamedTuple
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -49,6 +49,13 @@ class AdjustmentReceipt(BudgetBalance):
     replayed: bool
 
 
+class BudgetPeriod(NamedTuple):
+    id: str
+    start: datetime
+    end: datetime
+    opening: Decimal
+
+
 def month(at: datetime, zone: str) -> tuple[datetime, datetime]:
     if at.utcoffset() is None:
         raise BudgetError("timezone_required")
@@ -58,10 +65,9 @@ def month(at: datetime, zone: str) -> tuple[datetime, datetime]:
     return start.astimezone(UTC), following.astimezone(UTC)
 
 
-async def period(
-    session: AsyncSession, settings: Settings, provider: str, at: datetime
-) -> tuple[str, datetime, datetime, Decimal]:
-    start, end = month(at, settings.accounting_timezone)
+async def find_period(
+    session: AsyncSession, provider: str, start: datetime, end: datetime
+) -> BudgetPeriod | None:
     periods = budget_periods.c
     existing = (
         await session.execute(
@@ -73,11 +79,21 @@ async def period(
             )
         )
     ).all()
-    if existing:
-        row = existing[0]
-        if len(existing) != 1 or (row.starts_at, row.ends_at) != (stamp(start), stamp(end)):
-            raise BudgetError("budget_period_overlap")
-        return row.id, start, end, row.opening_budget
+    if not existing:
+        return None
+    row = existing[0]
+    if len(existing) != 1 or (row.starts_at, row.ends_at) != (stamp(start), stamp(end)):
+        raise BudgetError("budget_period_overlap")
+    return BudgetPeriod(row.id, start, end, row.opening_budget)
+
+
+async def period(
+    session: AsyncSession, settings: Settings, provider: str, at: datetime
+) -> BudgetPeriod:
+    start, end = month(at, settings.accounting_timezone)
+    if (existing := await find_period(session, provider, start, end)) is not None:
+        return existing
+    periods = budget_periods.c
     key = uuid4().hex
     opening = MONTHLY_BUDGET_USD
     await session.execute(
@@ -116,21 +132,19 @@ async def period(
                 occurred_at=boundary,
             )
         )
-    return key, start, end, opening
+    return BudgetPeriod(key, start, end, opening)
 
 
 async def projection(
     session: AsyncSession,
     settings: Settings,
     provider: str,
-    at: datetime,
+    current: BudgetPeriod,
 ) -> BudgetBalance:
     config = settings.providers.get(provider)
     if config is None:
         raise BudgetError("unknown_provider")
-    if config.kind == ProviderKind.LLAMACPP:
-        return BudgetBalance(provider=provider, enforcement_mode="local")
-    key, start, end, opening = await period(session, settings, provider, at)
+    key, start, end, opening = current
     openai = config.kind == ProviderKind.OPENAI
     holds, events, usage = request_reservations.c, reservation_events.c, usage_transactions.c
     terminal = select(events.request_id).where(events.kind.in_(("settled", "released")))

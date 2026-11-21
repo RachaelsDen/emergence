@@ -3,7 +3,8 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
-from anyio import Event, create_task_group
+from anyio import Event, create_task_group, fail_after
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from test_migrations import migrated_path as migrated_path
 
@@ -16,9 +17,11 @@ from emergence.config import (
     Settings,
 )
 from emergence.inference.schemas import InferenceRequest, Message, TokenUsage
-from emergence.resources.ledger import BudgetError, BudgetLedger
+from emergence.resources import ledger as ledger_module
+from emergence.resources.budgets import BudgetPeriod
+from emergence.resources.ledger import BudgetBalance, BudgetError, BudgetLedger
 from emergence.storage.database import Database
-from emergence.storage.models import requests
+from emergence.storage.models import budget_periods, requests
 from emergence.storage.repositories import ensure_catalog
 
 NOW = datetime(2026, 11, 29, 12, tzinfo=UTC)
@@ -116,7 +119,47 @@ async def test_independent_writers_compete_for_one_remaining_hold(migrated_path:
                 group.start_soon(contender, key)
         assert sorted(outcomes) == ["admitted", *(["budget_insufficient"] * 3)]
         balance = await ledger.balance("p", NOW)
-        assert (balance.spent, balance.reserved, balance.available) == (90, 10, 0)
+    assert (balance.spent, balance.reserved, balance.available) == (90, 10, 0)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("already_open", [False, True])
+async def test_balance_projection_does_not_hold_writer(
+    migrated_path: Path, monkeypatch: pytest.MonkeyPatch, already_open: bool
+) -> None:
+    async with Database(migrated_path) as db, Database(migrated_path) as peer:
+        ledger = await prepared(db, configuration(ProviderKind.OPENAI))
+        if already_open:
+            await ledger.balance("p", NOW)
+        entered, finished = Event(), Event()
+        projection = ledger_module.projection
+        balances: list[BudgetBalance] = []
+
+        async def delayed(
+            session: AsyncSession, settings: Settings, provider: str, current: BudgetPeriod
+        ) -> BudgetBalance:
+            assert await session.scalar(select(budget_periods.c.id)) == current.id
+            entered.set()
+            await finished.wait()
+            return await projection(session, settings, provider, current)
+
+        async def read_balance() -> None:
+            balances.append(await ledger.balance("p", NOW))
+
+        def unexpected_write() -> None:
+            pytest.fail("an existing period must not acquire the writer")
+
+        monkeypatch.setattr(ledger_module, "projection", delayed)
+        with fail_after(3), pytest.MonkeyPatch.context() as writer_patch:
+            if already_open:
+                writer_patch.setattr(db, "write", unexpected_write)
+            async with create_task_group() as tasks:
+                tasks.start_soon(read_balance)
+                await entered.wait()
+                async with peer.write() as session:
+                    assert await session.scalar(select(budget_periods.c.provider_id)) == "p"
+                finished.set()
+        assert len(balances) == 1 and balances[0].available == 100
 
 
 class SimulatedCrash(Exception):
