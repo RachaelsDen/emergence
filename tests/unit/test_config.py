@@ -14,6 +14,7 @@ from emergence.config import (
     Settings,
     load_settings,
 )
+from emergence.inference.schemas import InferenceRequest, Message
 
 
 @pytest.mark.parametrize("field", ["organization", "project"])
@@ -61,6 +62,76 @@ def test_invalid_config_never_exposes_input(tmp_path: Path, contents: str) -> No
     with pytest.raises(ConfigurationError) as captured:
         load_settings(config)
     assert str(captured.value) == "configuration_invalid"
+
+
+@pytest.mark.parametrize(
+    "contents",
+    [
+        b"port: 8001\n'SENTINEL_SECRET': first\nSENTINEL_SECRET: second\n",
+        b"port: 8001\nport: 8002\n",
+        (
+            b"providers:\n  local:\n    kind: llamacpp\n    quota_policy: local_limits_only\n"
+            b"    base_url: https://first.invalid\n    'base_url': https://second.invalid\n"
+        ),
+        (
+            b"providers:\n  local:\n"
+            b"    <<: {kind: llamacpp, quota_policy: local_limits_only, "
+            b"base_url: https://first.invalid, base_url: https://second.invalid}\n"
+        ),
+        b"host: SENTINEL_SECRET\xff\n",
+    ],
+)
+def test_duplicate_yaml_keys_and_invalid_utf8_are_sanitized(
+    tmp_path: Path, contents: bytes
+) -> None:
+    config = tmp_path / "invalid.yaml"
+    config.write_bytes(contents)
+    with pytest.raises(ConfigurationError, match="^configuration_invalid$") as captured:
+        load_settings(config)
+    assert captured.value.__cause__ is None
+    assert captured.value.__suppress_context__
+
+
+def test_yaml_merge_still_allows_an_explicit_override(tmp_path: Path) -> None:
+    config = tmp_path / "merge.yaml"
+    config.write_text(
+        "providers:\n"
+        "  first: &defaults\n"
+        "    kind: llamacpp\n"
+        "    quota_policy: local_limits_only\n"
+        "    base_url: https://first.invalid\n"
+        "  second:\n"
+        "    <<: *defaults\n"
+        "    base_url: https://second.invalid\n",
+        encoding="utf-8",
+    )
+    providers = load_settings(config).providers
+    assert providers["first"].base_url == "https://first.invalid"
+    assert providers["second"].base_url == "https://second.invalid"
+
+
+@pytest.mark.parametrize("length", [0, 1, 128, 129])
+def test_configured_model_alias_has_the_same_bounds_as_inference(length: int) -> None:
+    alias = "m" * length
+    provider = {
+        "kind": "llamacpp",
+        "quota_policy": "local_limits_only",
+        "base_url": "https://fixture.invalid",
+        "models": {alias: {"id": "upstream"}},
+    }
+    request = {
+        "provider": "local",
+        "model": alias,
+        "messages": (Message(role="user", content="x"),),
+    }
+    if length in (1, 128):
+        assert alias in ProviderConfig.model_validate(provider).models
+        assert InferenceRequest.model_validate(request).model == alias
+    else:
+        with pytest.raises(ValidationError):
+            ProviderConfig.model_validate(provider)
+        with pytest.raises(ValidationError):
+            InferenceRequest.model_validate(request)
 
 
 @pytest.mark.parametrize("explicit", [True, False])

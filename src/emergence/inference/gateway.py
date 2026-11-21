@@ -240,14 +240,9 @@ class Gateway:
                 claim_request_id=request_id,
             )
         except (SpoolError, OSError, SQLAlchemyError):
-            async with self.database.write() as session:
-                await append_event(
-                    session,
-                    request_id,
-                    RequestState.AMBIGUOUS,
-                    self.clock(),
-                    code="output_archive_failed",
-                )
+            # If this also fails, replay can recover the inactive dispatch.
+            with suppress(SQLAlchemyError):
+                await self.outcomes.mark_unarchived_dispatch(request_id, "output_archive_failed")
             raise GatewayError("output_archive_failed", request_id=request_id) from None
         verified_outcome = await self.outcomes.read_outcome(reference)
         async with self.database.write() as session:

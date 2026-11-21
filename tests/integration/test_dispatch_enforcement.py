@@ -7,12 +7,14 @@ import httpx
 import pytest
 from _gateway_fixture import answer, gateway_for, invocation, settings_for
 from anyio import Event, create_task_group, fail_after, sleep_forever
+from pydantic import JsonValue
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 from test_migrations import migrated_path as migrated_path
 
 from emergence.inference.gateway import GatewayError, GatewayResult, RequestState
-from emergence.storage.archive import SpoolError
+from emergence.storage.archive import RecordKey, SpoolError
+from emergence.storage.capacity import live_claims
 from emergence.storage.models import (
     request_events,
     request_reservations,
@@ -51,6 +53,64 @@ async def test_timeout_and_restart_preserve_identity_and_hold_without_redispatch
             await gateway.infer(invocation(content="different"), "same-key")
         assert (await ledger.balance("p")).reserved == Decimal("0.03")
     assert calls == ["/v1/chat/completions"]
+
+
+@pytest.mark.anyio
+async def test_replay_recovers_when_the_output_and_fallback_write_both_fail(
+    migrated_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return answer()
+
+    async with gateway_for(migrated_path, settings_for(), respond) as (gateway, ledger, db, spool):
+        publish = spool.publish
+
+        async def fail_output(
+            key: RecordKey, payload: JsonValue, *, claim_request_id: str | None = None
+        ) -> ArchiveReference:
+            if key.kind == "output":
+                raise OSError("simulated output storage failure")
+            return await publish(key, payload, claim_request_id=claim_request_id)
+
+        async with db.write() as session:
+            await session.execute(
+                text(
+                    "CREATE TRIGGER fallback_fault BEFORE INSERT ON request_events "
+                    "WHEN NEW.kind = 'ambiguous' "
+                    "BEGIN SELECT RAISE(ABORT, 'simulated fallback write failure'); END"
+                )
+            )
+        with monkeypatch.context() as patch:
+            patch.setattr(spool, "publish", fail_output)
+            with pytest.raises(GatewayError, match="output_archive_failed") as caught:
+                await gateway.infer(invocation(), "lost-output")
+        request_id = caught.value.request_id
+        assert request_id is not None
+        assert (await gateway.get(request_id)).state is RequestState.DISPATCHED
+        async with db.write() as session:
+            await session.execute(text("DROP TRIGGER fallback_fault"))
+
+        for _ in range(2):
+            replay = await gateway.infer(invocation(), "lost-output")
+            assert replay.replayed and replay.request_id == request_id
+            assert replay.state is RequestState.AMBIGUOUS
+            assert replay.error_code == "interrupted_after_dispatch" and replay.result is None
+        assert (await ledger.balance("p")).reserved == Decimal("0.03")
+        async with db.session() as session:
+            (claim,) = await live_claims(session)
+            assert (claim.state, claim.remaining_bytes) == ("ambiguous", 0)
+            events = await session.scalars(
+                select(request_events.c.kind).order_by(request_events.c.sequence)
+            )
+            assert tuple(events) == ("admitted", "dispatched", "ambiguous")
+        assert calls == ["/v1/chat/completions"]
+        resolved = await gateway.resolve(request_id, None, "Confirmed no charge", "operator")
+        assert resolved.state is RequestState.RESOLVED
+        assert (await ledger.balance("p")).reserved == 0
+        assert (await gateway.infer(invocation(), "next")).state is RequestState.COMPLETED
 
 
 @pytest.mark.anyio

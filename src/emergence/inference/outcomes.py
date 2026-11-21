@@ -172,6 +172,23 @@ class OutcomeStore:
             ArchiveReference(row.record_id, row.checksum, row.size_bytes)
         )
 
+    async def mark_unarchived_dispatch(
+        self, request_id: str, code: str
+    ) -> tuple[RequestState, str | None]:
+        async with self.database.write() as session:
+            state, previous_code = await read_state(session, request_id)
+            if state is not RequestState.DISPATCHED:
+                return state, previous_code
+            return await self.finish(
+                session,
+                ArchivedOutcome(
+                    request_id=request_id,
+                    observed_at=self.clock(),
+                    failure=FailureRecord(code=code, ambiguous=True),
+                ),
+                None,
+            )
+
     async def replay(self, request_id: str, *, active: bool) -> GatewayResult:
         """Verify archive evidence outside the writer, then reconcile current state."""
         async with self.database.session() as session:
@@ -189,6 +206,10 @@ class OutcomeStore:
                 state, code = await self.finish(
                     session, outcome, RecordKey(request_id, "output").record_id
                 )
+        elif outcome is None and state is RequestState.DISPATCHED and not active:
+            state, code = await self.mark_unarchived_dispatch(
+                request_id, "interrupted_after_dispatch"
+            )
         return GatewayResult(
             request_id=request_id,
             state=state,
@@ -221,18 +242,7 @@ class OutcomeStore:
             elif claim.state == "admitted":
                 await self.fail_before_dispatch(claim.request_id, "interrupted_before_dispatch")
             elif claim.state == "dispatched":
-                async with self.database.write() as session:
-                    await self.finish(
-                        session,
-                        ArchivedOutcome(
-                            request_id=claim.request_id,
-                            observed_at=self.clock(),
-                            failure=FailureRecord(
-                                code="interrupted_after_dispatch", ambiguous=True
-                            ),
-                        ),
-                        None,
-                    )
+                await self.mark_unarchived_dispatch(claim.request_id, "interrupted_after_dispatch")
 
     async def resolve(
         self, request_id: str, amount: Decimal | None, reason: str, actor: str

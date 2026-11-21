@@ -1,6 +1,7 @@
 """Non-secret configuration; credential values live exclusively in the environment."""
 
 import os
+from collections.abc import Hashable
 from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
@@ -21,10 +22,42 @@ from pydantic import (
 )
 from pydantic_core import PydanticCustomError
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
+from yaml.constructor import ConstructorError
+from yaml.nodes import MappingNode, ScalarNode
 
 type PositiveInt = Annotated[int, Field(gt=0)]
 type EnvName = Annotated[str, Field(pattern=r"^[A-Z][A-Z0-9_]*$")]
+ModelAlias = Annotated[str, Field(min_length=1, max_length=128)]
 MONTHLY_BUDGET_USD: Final = Decimal("100")
+
+
+class _UniqueKeyLoader(yaml.SafeLoader):
+    """Reject repeated explicit keys while preserving YAML merge precedence."""
+
+    def __init__(self, stream: str) -> None:
+        super().__init__(stream)
+        self._checked: set[MappingNode] = set()
+
+    def flatten_mapping(self, node: MappingNode) -> None:
+        if node not in self._checked:
+            self._checked.add(node)
+            seen: set[Hashable] = set()
+            merge_key = object()
+            for key_node, _ in node.value:
+                key: object
+                if key_node.tag == "tag:yaml.org,2002:merge":
+                    key = merge_key
+                elif isinstance(key_node, ScalarNode) and key_node.tag == "tag:yaml.org,2002:value":
+                    key = key_node.value
+                else:
+                    # PyYAML's stub does not annotate the node parameter.
+                    key = self.construct_object(key_node)  # pyright: ignore[reportUnknownMemberType]
+                if not isinstance(key, Hashable) or key in seen:
+                    raise ConstructorError(
+                        None, None, "duplicate or unhashable mapping key", key_node.start_mark
+                    )
+                seen.add(key)
+        super().flatten_mapping(node)
 
 
 class ConfigurationError(Exception):
@@ -69,7 +102,7 @@ class ProviderConfig(SafeModel):
     enabled: bool = True
     quota_policy: QuotaPolicy
     base_url: str
-    models: dict[str, ModelConfig] = Field(default_factory=dict)
+    models: dict[ModelAlias, ModelConfig] = Field(default_factory=dict)
     credential_env: EnvName | None = None
     reporting_credential_env: EnvName | None = None
     quota_url: str | None = None
@@ -233,7 +266,7 @@ def load_settings(path: Path | None = None) -> Settings:
     try:
         if selected is None:
             return Settings()
-        parsed = yaml.safe_load(selected.read_text(encoding="utf-8"))
+        parsed = yaml.load(selected.read_text(encoding="utf-8"), Loader=_UniqueKeyLoader)
         return Settings.model_validate(parsed)
-    except (OSError, yaml.YAMLError, ValidationError):
+    except (OSError, UnicodeDecodeError, yaml.YAMLError, ValidationError):
         raise ConfigurationError("configuration_invalid") from None
