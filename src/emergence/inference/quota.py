@@ -13,6 +13,7 @@ from emergence.storage.capacity import live_claims
 from emergence.storage.gateway_state import request_capacity
 from emergence.storage.models import (
     quota_observations,
+    request_events,
     request_reservations,
     requests,
     usage_transactions,
@@ -66,6 +67,13 @@ async def check_quota(
                     usage_transactions.c.estimated_cost, request_reservations.c.amount
                 ).label("committed_usd"),
                 usage_transactions.c.occurred_at.label("settled_at"),
+                select(request_events.c.id)
+                .where(
+                    request_events.c.request_id == request_capacity.c.request_id,
+                    request_events.c.kind == "dispatched",
+                )
+                .exists()
+                .label("was_dispatched"),
             )
             .join(requests, requests.c.id == request_capacity.c.request_id)
             .outerjoin(
@@ -108,7 +116,7 @@ async def check_quota(
             for item in commitments
             if item.request_id != exclude
             and (
-                datetime.fromisoformat(item.created_at) >= observed
+                (item.was_dispatched and datetime.fromisoformat(item.created_at) >= observed)
                 or item.request_id in active
                 or (
                     item.settled_at is not None
