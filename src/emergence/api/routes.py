@@ -35,7 +35,7 @@ from emergence.telemetry.metrics import (
     storage_status,
 )
 
-from .dependencies import Authorization, ErrorResponse, Identity, Services
+from .dependencies import ERROR_DESCRIPTIONS, Authorization, ErrorResponse, Identity, Services
 
 
 def _money(value: JsonValue) -> Decimal:
@@ -162,8 +162,8 @@ def install_routes(app: FastAPI, settings: Settings, services: Callable[[], Serv
     router = APIRouter(
         prefix="/api/v1",
         responses={
-            code: {"model": ErrorResponse}
-            for code in (400, 401, 402, 403, 404, 408, 409, 413, 422, 429, 503, 507)
+            code: {"model": ErrorResponse, "description": description}
+            for code, description in ERROR_DESCRIPTIONS.items()
         },
     )
     inference_times: deque[float] = deque()

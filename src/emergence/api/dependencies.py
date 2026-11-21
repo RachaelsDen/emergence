@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 from hmac import compare_digest
-from typing import Annotated, Literal
+from typing import Annotated, Final, Literal
 
 from anyio import fail_after
 from fastapi import HTTPException, Security
@@ -30,6 +30,22 @@ class Identity(SafeModel):
 class ErrorResponse(SafeModel):
     error: str
     request_id: str | None = None
+
+
+ERROR_DESCRIPTIONS: Final = {
+    400: "Bad Request",
+    401: "Unauthorized",
+    402: "Payment Required",
+    403: "Forbidden",
+    404: "Not Found",
+    408: "Request Timeout",
+    409: "Conflict",
+    413: "Content Too Large",
+    422: "Unprocessable Content",
+    429: "Too Many Requests",
+    503: "Service Unavailable",
+    507: "Insufficient Storage",
+}
 
 
 class Authorization:
