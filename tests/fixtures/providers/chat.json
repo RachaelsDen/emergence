@@ -1,0 +1,15 @@
+{
+  "id": "fixture-completion",
+  "model": "configured-model",
+  "choices": [
+    {"message": {"role": "assistant", "content": "fixture answer"}, "finish_reason": "stop"}
+  ],
+  "usage": {
+    "prompt_tokens": 24,
+    "completion_tokens": 7,
+    "total_tokens": 31,
+    "prompt_tokens_details": {"cached_tokens": 9},
+    "completion_tokens_details": {"reasoning_tokens": 2},
+    "vendor_detail": "preserved"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "code": 200,
+  "data": {
+    "limits": [
+      {"type": "TOKENS_LIMIT", "percentage": 21.75, "unit": 3, "number": 9000},
+      {"type": "TIME_LIMIT", "percentage": 100, "usageDetails": [{"name": "zread"}]},
+      {"type": "FUTURE_LIMIT", "percentage": 5}
+    ]
+  }
+}

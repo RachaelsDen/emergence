@@ -1,0 +1,4 @@
+{
+  "synthetic_fixture": true,
+  "pretend_quota": {"total": 100, "remaining": 88, "reset_at": null}
+}

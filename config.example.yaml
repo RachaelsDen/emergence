@@ -1,0 +1,116 @@
+# Non-secret settings only. Replace each selected model ID with its exact,
+# operator-verified upstream ID before enabling that provider.
+host: 127.0.0.1
+port: 8000
+# Relative to process working directory for checkout use. For systemd set
+# /var/lib/emergence/core.sqlite3 and /var/lib/emergence/spool in config.yaml.
+database_path: var/core.sqlite3
+spool_path: var/spool
+archive_path: null
+archive_mount_path: null
+accounting_timezone: UTC
+operator_token_env: EMERGENCE_OPERATOR_TOKEN
+reader_token_env: EMERGENCE_READER_TOKEN
+metrics_enabled: false
+enforce_budgets: true
+spool_limit_bytes: 268435456
+disk_headroom_bytes: 67108864
+request_limit_bytes: 1048576
+request_body_timeout_seconds: 10
+requests_per_minute: 30
+poll_concurrency: 2
+
+providers:
+  zai:
+    kind: zai
+    enabled: false
+    quota_policy: local_limits_only
+    # Coding-plan endpoint/key, not the PAYG base/key. Confirm entitlement.
+    base_url: https://api.z.ai/api/coding/paas/v4
+    credential_env: EMERGENCE_ZAI_CODING_KEY
+    quota_url: https://api.z.ai/api/monitor/usage/quota/limit
+    monthly_budget: "100"
+    concurrency: 1
+    timeout_seconds: 30
+    response_limit_bytes: 262144
+    models:
+      chat:
+        id: OPERATOR_SUPPLIED_ZAI_MODEL_ID
+        max_input_tokens: 4096
+        max_output_tokens: 256
+        input_overhead_tokens: 512
+        input_bound_verified: false
+        output_bound_verified: false
+        reasoning_in_output_bound_verified: false
+  minimax:
+    kind: minimax
+    enabled: false
+    quota_policy: local_limits_only
+    # Verify this compatible base for your coding-plan key/region; never
+    # silently substitute a PAYG key or endpoint.
+    base_url: https://api.minimax.io/v1
+    credential_env: EMERGENCE_MINIMAX_CODING_KEY
+    quota_url: https://www.minimax.io/v1/token_plan/remains
+    monthly_budget: "100"
+    concurrency: 1
+    timeout_seconds: 30
+    response_limit_bytes: 262144
+    models:
+      chat:
+        id: OPERATOR_SUPPLIED_MINIMAX_MODEL_ID
+        max_input_tokens: 4096
+        max_output_tokens: 256
+        input_overhead_tokens: 512
+        input_bound_verified: false
+        output_bound_verified: false
+        # Mandatory reasoning must fit INSIDE the verified output bound.
+        reasoning_in_output_bound_verified: false
+  openai:
+    kind: openai
+    enabled: false
+    quota_policy: local_limits_only
+    base_url: https://api.openai.com/v1
+    credential_env: EMERGENCE_OPENAI_INFERENCE_KEY
+    reporting_base_url: https://api.openai.com/v1
+    reporting_credential_env: EMERGENCE_OPENAI_ADMIN_REPORTING_KEY
+    reporting_key_expires_at: null
+    # Set the actual organization and project independently of credentials.
+    organization: null
+    project: null
+    monthly_budget: "100"
+    safety_limit: "95"
+    safety_limit_confirmed: false
+    concurrency: 1
+    timeout_seconds: 30
+    response_limit_bytes: 262144
+    models:
+      chat:
+        id: OPERATOR_SUPPLIED_OPENAI_MODEL_ID
+        max_input_tokens: 4096
+        max_output_tokens: 256
+        input_overhead_tokens: 512
+        input_bound_verified: false
+        output_bound_verified: false
+        reasoning_in_output_bound_verified: false
+  local:
+    kind: llamacpp
+    enabled: false
+    quota_policy: local_limits_only
+    # Replace with the trusted llama.cpp listener reachable from the core.
+    base_url: http://127.0.0.1:8080/v1
+    concurrency: 1
+    timeout_seconds: 30
+    response_limit_bytes: 262144
+    models:
+      chat:
+        id: OPERATOR_SUPPLIED_LLAMACPP_MODEL_ID
+        max_input_tokens: 4096
+        max_output_tokens: 256
+        input_overhead_tokens: 512
+        input_bound_verified: false
+        output_bound_verified: false
+        reasoning_in_output_bound_verified: false
+
+# Supply sourced, versioned rates in exact USD per million tokens with a
+# timezone-aware effective instant. See docs/operations.md. No fixture prices.
+prices: []

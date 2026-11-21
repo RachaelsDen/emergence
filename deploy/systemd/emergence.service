@@ -1,0 +1,26 @@
+[Unit]
+Description=Emergence trusted core
+After=network.target
+
+[Service]
+Type=simple
+User=emergence
+Group=emergence
+WorkingDirectory=/opt/emergence
+EnvironmentFile=/etc/emergence/secrets.env
+ExecStart=/opt/emergence/.venv/bin/emergence serve --config /etc/emergence/config.yaml
+StateDirectory=emergence
+StateDirectoryMode=0700
+UMask=0077
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=45s
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+RestrictSUIDSGID=yes
+
+[Install]
+WantedBy=multi-user.target
