@@ -15,7 +15,7 @@ from emergence.inference.errors import GatewayError as GatewayError
 from emergence.inference.outcomes import OutcomeStore
 from emergence.inference.quota import check_quota
 from emergence.inference.request_state import ArchivedOutcome as ArchivedOutcome
-from emergence.inference.request_state import FailureRecord, append_event
+from emergence.inference.request_state import FailureRecord, append_event, read_state
 from emergence.inference.request_state import GatewayResult as GatewayResult
 from emergence.inference.request_state import RequestState as RequestState
 from emergence.inference.schemas import InferenceRequest
@@ -73,6 +73,7 @@ class Gateway:
         identity = sha256(idempotency_key.encode("utf-8")).hexdigest()
         request_id = uuid4().hex
         now = self.clock().astimezone(UTC)
+        terminal_id: str | None = None
         async with self.database.write() as session:
             existing = (
                 await session.execute(
@@ -85,7 +86,11 @@ class Gateway:
             if existing is not None:
                 if existing.input_fingerprint != fingerprint:
                     raise GatewayError("idempotency_conflict", 409)
-                return await self.outcomes.replay(session, existing.id)
+                state, _ = await read_state(session, existing.id)
+                if state in {RequestState.COMPLETED, RequestState.FAILED, RequestState.RESOLVED}:
+                    terminal_id = existing.id
+                else:
+                    return await self.outcomes.replay(session, existing.id)
             else:
                 provider = self.registry.get(invocation.provider)
                 model = provider.preflight(
@@ -152,6 +157,8 @@ class Gateway:
                     )
                 )
                 await append_event(session, request_id, RequestState.ADMITTED, now)
+        if terminal_id is not None:
+            return await self.outcomes.get(terminal_id, replayed=True)
         try:
             input_ref = await self.spool.publish(
                 RecordKey(request_id, "input"),
