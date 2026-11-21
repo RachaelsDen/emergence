@@ -1,15 +1,17 @@
 """Chat-completion transport shared only where the wire protocol is compatible."""
 
 from dataclasses import dataclass
-from typing import Annotated, Literal, Protocol
+from typing import Literal, Protocol
 
 import httpx
 from anyio import fail_after
-from pydantic import BaseModel, Field, JsonValue, SecretStr, TypeAdapter, ValidationError
+from pydantic import JsonValue, SecretStr, TypeAdapter, ValidationError
 
 from emergence.config import ModelConfig, ProviderConfig, ProviderKind, SafeModel, Settings
-from emergence.inference.schemas import InferenceRequest, InferenceResult, TokenCount, TokenUsage
+from emergence.inference.schemas import InferenceRequest, InferenceResult, TokenUsage
 from emergence.telemetry.logging import Redactor
+
+from .wire import Completion
 
 
 class FeatureBound(SafeModel):
@@ -39,40 +41,6 @@ class Provider(Protocol):
     def features(self, model: ModelConfig) -> tuple[FeatureBound, ...]: ...
     def preflight(self, request: InferenceRequest, *, cost_enforced: bool) -> ModelConfig: ...
     async def infer(self, request: InferenceRequest) -> InferenceResult: ...
-
-
-class _PromptDetails(BaseModel):
-    cached_tokens: TokenCount | None = None
-
-
-class _CompletionDetails(BaseModel):
-    reasoning_tokens: TokenCount | None = None
-
-
-class _Usage(BaseModel):
-    prompt_tokens: TokenCount | None = None
-    completion_tokens: TokenCount | None = None
-    total_tokens: TokenCount | None = None
-    prompt_tokens_details: _PromptDetails | None = None
-    completion_tokens_details: _CompletionDetails | None = None
-
-
-class _ResponseMessage(BaseModel):
-    content: str | None = None
-    tool_calls: list[JsonValue] = Field(default_factory=list[JsonValue])
-    reasoning_content: str | None = None
-
-
-class _Choice(BaseModel):
-    message: _ResponseMessage
-    finish_reason: str | None = None
-
-
-class _Completion(BaseModel):
-    id: str | None = None
-    model: str
-    choices: Annotated[list[_Choice], Field(min_length=1, max_length=1)]
-    usage: _Usage | None = None
 
 
 class ChatAdapter:
@@ -182,12 +150,19 @@ class ChatAdapter:
         return payload
 
     def _inference_credential(self) -> SecretStr | None:
-        """Check the resolved value against every configured OpenAI Admin credential."""
+        """Keep API role and OpenAI Admin credentials out of inference headers."""
         credential = self._settings.secret(self.config.credential_env)
+        protected = (
+            self._settings.operator_token_env,
+            self._settings.reader_token_env,
+            *(
+                provider.reporting_credential_env
+                for provider in self._settings.providers.values()
+                if provider.kind is ProviderKind.OPENAI
+            ),
+        )
         if credential is not None and any(
-            credential == self._settings.secret(provider.reporting_credential_env)
-            for provider in self._settings.providers.values()
-            if provider.kind is ProviderKind.OPENAI
+            credential == self._settings.secret(name) for name in protected
         ):
             raise ProviderFailure("shared_inference_credential")
         return credential
@@ -232,12 +207,7 @@ class ChatAdapter:
                         body.extend(chunk)
                     content = bytes(body)
                     status_code = response.status_code
-        except (
-            TimeoutError,
-            httpx.TimeoutException,
-            httpx.NetworkError,
-            httpx.RemoteProtocolError,
-        ):
+        except (TimeoutError, httpx.RequestError):
             raise ProviderFailure(
                 "provider_transport_error",
                 ambiguous=True,
@@ -257,7 +227,7 @@ class ChatAdapter:
                 raw_response=raw,
             )
         try:
-            completion = _Completion.model_validate(raw)
+            completion = Completion.model_validate(raw)
             usage = completion.usage
             normalized = TokenUsage(
                 input_tokens=usage.prompt_tokens if usage else None,

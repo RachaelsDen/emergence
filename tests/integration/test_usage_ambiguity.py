@@ -16,8 +16,9 @@ from emergence.storage.repositories import ArchiveReference
 
 
 @pytest.mark.anyio
-async def test_boolean_usage_preserves_full_hold_and_replays_without_dispatch(
-    migrated_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("malformed_usage", [True, False], ids=["usage", "compressed-body"])
+async def test_invalid_wire_response_preserves_hold_and_replays_without_dispatch(
+    migrated_path: Path, monkeypatch: pytest.MonkeyPatch, malformed_usage: bool
 ) -> None:
     monkeypatch.setenv("TEST_E005_INFERENCE", "synthetic-b1-inference")
     payload = {
@@ -29,13 +30,19 @@ async def test_boolean_usage_preserves_full_hold_and_replays_without_dispatch(
 
     def respond(request: httpx.Request) -> httpx.Response:
         calls.append(request.url.path)
-        return httpx.Response(200, json=payload)
+        if malformed_usage:
+            return httpx.Response(200, json=payload)
+        return httpx.Response(
+            200, headers={"Content-Encoding": "gzip"}, stream=httpx.ByteStream(b"invalid gzip")
+        )
 
     settings = settings_for()
     async with gateway_for(migrated_path, settings, respond) as (gateway, ledger, database, spool):
         first = await gateway.infer(invocation(), "malformed-usage")
         assert first.state is RequestState.AMBIGUOUS
-        assert first.error_code == "provider_schema_error"
+        assert first.error_code == (
+            "provider_schema_error" if malformed_usage else "provider_transport_error"
+        )
         assert first.result is None
         record_id = RecordKey(first.request_id, "output").record_id
         async with database.session() as session:
@@ -47,9 +54,13 @@ async def test_boolean_usage_preserves_full_hold_and_replays_without_dispatch(
         record = await spool.read(ArchiveReference(record_id, row.checksum, row.size_bytes))
         outcome = ArchivedOutcome.model_validate_json(record.split(b"\n", 2)[2])
         assert outcome.failure is not None
-        assert outcome.failure.raw_response == payload
+        if malformed_usage:
+            assert outcome.failure.raw_response == payload
         balance = await ledger.balance("p", NOW)
         assert (balance.reserved, balance.spent) == (Decimal("0.03"), Decimal("0"))
+        immediate = await gateway.infer(invocation(), "malformed-usage")
+        assert immediate.replayed and immediate.state is RequestState.AMBIGUOUS
+        assert immediate.error_code == first.error_code
 
     async with gateway_for(migrated_path, settings, respond) as (gateway, ledger, _, _):
         replay = await gateway.infer(invocation(), "malformed-usage")

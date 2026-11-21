@@ -61,3 +61,31 @@ async def test_admin_value_collision_rejects_before_hold_or_transport(
         async with database.session() as session:
             assert await session.scalar(select(func.count()).select_from(requests)) == 0
             assert await session.scalar(select(func.count()).select_from(request_reservations)) == 0
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("operator", [False, True], ids=["reader", "operator"])
+@pytest.mark.parametrize("enforce_budgets", [True, False], ids=["enforced", "shadow"])
+async def test_api_role_value_cannot_reach_provider_or_create_a_hold(
+    migrated_path: Path, monkeypatch: pytest.MonkeyPatch, operator: bool, enforce_budgets: bool
+) -> None:
+    shared = "synthetic-api-role-only-0123456789abcdef"
+    settings = settings_for().model_copy(update={"enforce_budgets": enforce_budgets})
+    monkeypatch.setenv("TEST_E005_INFERENCE", shared)
+    monkeypatch.setenv(
+        settings.operator_token_env if operator else settings.reader_token_env, shared
+    )
+    calls: list[str] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return answer()
+
+    async with gateway_for(migrated_path, settings, respond) as (gateway, _, database, _):
+        with pytest.raises(ProviderFailure, match="shared_inference_credential") as failure:
+            await gateway.infer(invocation(), "role-collision")
+        assert shared not in str(failure.value)
+        assert calls == []
+        async with database.session() as session:
+            assert await session.scalar(select(func.count()).select_from(requests)) == 0
+            assert await session.scalar(select(func.count()).select_from(request_reservations)) == 0
