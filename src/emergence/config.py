@@ -89,10 +89,19 @@ class ProviderConfig(SafeModel):
     safety_limit: Annotated[Decimal, Field(gt=0, allow_inf_nan=False)] = Decimal("95")
     safety_limit_confirmed: bool = False
 
+    @property
+    def inference_url(self) -> str:
+        return f"{self.base_url.rstrip('/')}/chat/completions"
+
     @model_validator(mode="after")
     def validate_endpoints(self) -> Self:
         """Credentials belong in secret sources, never in persisted endpoint URLs."""
-        for endpoint in (self.base_url, self.quota_url, self.reporting_base_url):
+        for endpoint in (
+            self.base_url,
+            self.inference_url,
+            self.quota_url,
+            self.reporting_base_url,
+        ):
             if endpoint is None:
                 continue
             try:

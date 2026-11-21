@@ -163,7 +163,7 @@ class ChatAdapter:
             with fail_after(self.config.timeout_seconds):
                 async with self._client.stream(
                     "POST",
-                    f"{self.config.base_url.rstrip('/')}/chat/completions",
+                    self.config.inference_url,
                     headers=self.headers(),
                     json=self.payload(request, model),
                     timeout=self.config.timeout_seconds,
