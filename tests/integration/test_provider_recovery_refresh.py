@@ -4,7 +4,7 @@ from dataclasses import replace
 from datetime import timedelta
 
 import pytest
-from test_api import JSON_OBJECT
+from test_api import JSON_OBJECT, READER
 from test_migrations import migrated_path as migrated_path
 from test_provider_recovery import PATH, Harness, Receipt, denial, infer
 from test_provider_recovery import harness as harness
@@ -20,9 +20,9 @@ async def test_expired_recovery_can_be_confirmed_again_without_replaying_old_aut
     async with harness.open() as client:
         rejected = Receipt.model_validate_json((await infer(client, "denial")).content)
         body = {"request_id": rejected.request_id, "reason": "Independently confirmed top-up"}
-        first = await client.post(PATH, json=body)
-        assert first.status_code == 200
-        observation_id = JSON_OBJECT.validate_json(first.content)["observation_id"]
+        assert (await client.get(PATH)).status_code == 409
+        # Simulate losing the POST response: never retain its receipt.
+        assert (await client.post(PATH, json=body)).status_code == 200
     provider = harness.settings.providers["p"].model_copy(
         update={"quota_policy": QuotaPolicy.REQUIRE_FRESH}
     )
@@ -32,9 +32,20 @@ async def test_expired_recovery_can_be_confirmed_again_without_replaying_old_aut
         blocked = await infer(client, "expired")
         assert JSON_OBJECT.validate_json(blocked.content)["error"] == "provider_capacity_unknown"
         assert (await client.post(PATH, json=body)).status_code == 409
+        reader = await client.get(PATH, headers={"Authorization": f"Bearer {READER}"})
+        assert reader.status_code == 403
+        current = await client.get(PATH)
+        assert current.status_code == 200
+        lookup = JSON_OBJECT.validate_json(current.content)
+        assert lookup["request_id"] == rejected.request_id
+        observation_id = lookup["observation_id"]
         confirmation = {**body, "observation_id": observation_id}
         refreshed = await client.post(PATH, json=confirmation)
         assert refreshed.status_code == 200
+        assert (
+            JSON_OBJECT.validate_json((await client.get(PATH)).content)["observation_id"]
+            == (JSON_OBJECT.validate_json(refreshed.content)["observation_id"])
+        )
         assert (await client.post(PATH, json=confirmation)).status_code == 409
         assert (
             Receipt.model_validate_json((await infer(client, "fresh-confirmation")).content).state

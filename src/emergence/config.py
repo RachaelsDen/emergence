@@ -123,6 +123,15 @@ class ProviderConfig(SafeModel):
                 raise PydanticCustomError("endpoint", "endpoint must be a credential-free HTTP URL")
         return self
 
+    @model_validator(mode="after")
+    def validate_openai_scope(self) -> Self:
+        if self.kind is ProviderKind.OPENAI and any(
+            value is not None and (not value or any(not "!" <= char <= "~" for char in value))
+            for value in (self.organization, self.project)
+        ):
+            raise PydanticCustomError("openai_scope", "OpenAI scope must be visible ASCII")
+        return self
+
 
 class PriceConfig(SafeModel):
     """Operator-sourced price versions; amounts are USD per million tokens."""

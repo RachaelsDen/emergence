@@ -1,7 +1,11 @@
 """Prometheus is optional; authenticated storage status does not depend on it."""
 
+from dataclasses import replace
+
 import pytest
-from _gateway_fixture import invocation
+from _gateway_fixture import answer, invocation
+from _recovery_fixture import Harness
+from _recovery_fixture import harness as harness
 from httpx import AsyncClient
 from prometheus_client.parser import text_string_to_metric_families
 from pydantic import JsonValue, TypeAdapter
@@ -10,6 +14,7 @@ from test_api import api as api
 from test_api import metrics_enabled as metrics_enabled
 from test_api import provider_enabled as provider_enabled
 from test_migrations import migrated_path as migrated_path
+from test_provider_recovery import infer
 
 
 @pytest.mark.anyio
@@ -60,3 +65,22 @@ async def test_metrics_report_actual_requests_usage_and_process_latency(
     assert tokens == {"input": 5, "output": 3}
     assert OPERATOR not in metrics.text and READER not in metrics.text
     assert "bounded answer" not in metrics.text
+
+
+@pytest.mark.anyio
+async def test_metrics_expose_exact_token_totals_above_sqlite_integer_range(
+    harness: Harness,
+) -> None:
+    harness.replies.extend((answer(), answer(2**63 - 1, 3)))
+    settings = harness.settings.model_copy(update={"metrics_enabled": True})
+    async with replace(harness, settings=settings).open() as client:
+        assert (await infer(client, "ordinary-usage")).status_code == 200
+        exceeded = await infer(client, "excessive-usage")
+        assert exceeded.status_code == 200
+        assert "billable_bound_violation" in exceeded.text
+        metrics = await client.get("/metrics", headers={"Authorization": f"Bearer {READER}"})
+        assert metrics.status_code == 200
+        assert (
+            'emergence_observed_tokens_total{provider="p",model="m",source="request",'
+            f'dimension="input"}} {2**63 + 4}'
+        ) in metrics.text.splitlines()

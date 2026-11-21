@@ -49,7 +49,10 @@ target unit is installed.
 
    Alembic alone can override its target using `EMERGENCE_DATABASE_PATH`;
    unset it when migrating the YAML target. Verify the migration and ownership.
-   Startup does not create or migrate the database.
+   Alembic enables SQLite WAL mode. For an existing database, rerun the same
+   command with the service stopped, even if it is already at the current
+   revision. Readiness requires WAL mode; startup does not change it or create
+   or migrate the database.
 5. Install `deploy/systemd/emergence.service` under
    `/etc/systemd/system/`. Run `systemctl daemon-reload`, then
    `systemctl enable --now emergence.service`. Check

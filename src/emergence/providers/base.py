@@ -1,5 +1,7 @@
 """Chat-completion transport shared only where the wire protocol is compatible."""
 
+import json
+
 import httpx
 from anyio import fail_after
 from pydantic import JsonValue, SecretStr, TypeAdapter, ValidationError
@@ -12,6 +14,15 @@ from .contracts import FeatureBound as FeatureBound
 from .contracts import Provider as Provider
 from .contracts import ProviderFailure as ProviderFailure
 from .wire import Completion
+
+
+class _DuplicateMember(ValueError):
+    pass
+
+
+def _check_unique_members(pairs: list[tuple[str, object]]) -> None:
+    if len({key for key, _ in pairs}) != len(pairs):
+        raise _DuplicateMember
 
 
 class ChatAdapter:
@@ -144,7 +155,7 @@ class ChatAdapter:
         return credential
 
     def headers(self) -> dict[str, str]:
-        headers: dict[str, str] = {}
+        headers = {"Accept-Encoding": "identity"}
         # Use the exact value just checked, not a second lookup after preflight.
         credential = self._inference_credential()
         if credential is not None:
@@ -169,9 +180,16 @@ class ChatAdapter:
                     timeout=self.config.timeout_seconds,
                     follow_redirects=False,
                 ) as response:
-                    async for chunk in response.aiter_bytes():
-                        if len(body) + len(chunk) > self.config.response_limit_bytes:
-                            remaining = self.config.response_limit_bytes - len(body)
+                    if response.headers.get("content-encoding", "identity").strip().lower() != (
+                        "identity"
+                    ):
+                        raise ProviderFailure(
+                            "provider_response_encoding_unsupported", ambiguous=True
+                        )
+
+                    def append(chunk: bytes) -> None:
+                        remaining = self.config.response_limit_bytes - len(body)
+                        if len(chunk) > remaining:
                             body.extend(chunk[:remaining])
                             raise ProviderFailure(
                                 "provider_response_too_large",
@@ -181,6 +199,12 @@ class ChatAdapter:
                                 ),
                             )
                         body.extend(chunk)
+
+                    if response.is_stream_consumed:
+                        append(response.content)  # An injected transport may preload the body.
+                    else:
+                        async for chunk in response.aiter_raw():
+                            append(chunk)
                     content = bytes(body)
                     status_code = response.status_code
         except (TimeoutError, httpx.RequestError):
@@ -190,8 +214,21 @@ class ChatAdapter:
                 raw_response=self._redactor.text(body.decode("utf-8", errors="replace")),
             ) from None
         try:
+            # Check the original bounded body before Pydantic collapses
+            # duplicate names. Preserve its numeric parsing for valid objects.
+            json.loads(
+                content, object_pairs_hook=_check_unique_members, parse_int=str, parse_float=str
+            )
             raw = self._redactor.value(TypeAdapter(JsonValue).validate_json(content))
-        except ValidationError:
+        except _DuplicateMember:
+            # Preserve both members as redacted text, not a collapsed object.
+            raise ProviderFailure(
+                "provider_schema_error",
+                ambiguous=True,
+                status_code=status_code,
+                raw_response=self._redactor.text(content.decode("utf-8", errors="replace")),
+            ) from None
+        except (ValueError, RecursionError):
             raw = self._redactor.text(content.decode("utf-8", errors="replace"))
         if not 200 <= status_code < 300:
             # Auth/rate-limit rejection is known not to be a successful inference;

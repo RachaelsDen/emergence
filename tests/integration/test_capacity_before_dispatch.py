@@ -9,7 +9,7 @@ import pytest
 from _gateway_fixture import NOW, answer, gateway_for, invocation, settings_for
 from anyio import Event, create_task_group, fail_after
 from pydantic import JsonValue
-from sqlalchemy import select
+from sqlalchemy import select, text
 from test_migrations import migrated_path as migrated_path
 from test_provider_quota_policy import gateway_key as gateway_key
 
@@ -135,6 +135,8 @@ async def test_pending_input_publication_still_reserves_observed_capacity(
             with fail_after(2):
                 await entered.wait()
             try:
+                replay = await gateway.infer(invocation(), "pending")
+                assert replay.state is RequestState.ADMITTED and replay.replayed
                 await gateway.infer(invocation(), "competing")
             except GatewayError as error:
                 denied = error
@@ -181,3 +183,44 @@ async def test_retry_without_output_preserves_genuine_inflight_dispatch(
                     release.set()
         assert results[0].state is RequestState.COMPLETED
     assert calls == ["/v1/chat/completions"]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("cleanup_available", [True, False])
+async def test_predispatch_storage_failure_releases_admission_without_restart(
+    migrated_path: Path, cleanup_available: bool
+) -> None:
+    calls: list[str] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return answer()
+
+    async with gateway_for(migrated_path, settings_for(), respond) as (gateway, ledger, db, _):
+        blocked = "'dispatched'" if cleanup_available else "'dispatched', 'failed'"
+        async with db.write() as session:
+            await session.execute(
+                text(
+                    "CREATE TRIGGER dispatch_fault BEFORE INSERT ON request_events "
+                    f"WHEN NEW.kind IN ({blocked}) "
+                    "BEGIN SELECT RAISE(ABORT, 'simulated storage failure'); END"
+                )
+            )
+        with pytest.raises(GatewayError, match="local_storage_unavailable") as captured:
+            await gateway.infer(invocation(), "unsent")
+        request_id = captured.value.request_id
+        assert request_id is not None
+        expected = RequestState.FAILED if cleanup_available else RequestState.ADMITTED
+        assert (await gateway.get(request_id)).state is expected
+        async with db.write() as session:
+            await session.execute(text("DROP TRIGGER dispatch_fault"))
+
+        replay = await gateway.infer(invocation(), "unsent")
+        assert replay.state is RequestState.FAILED and replay.replayed
+        assert replay.request_id == request_id
+        assert (await ledger.balance("p", NOW)).reserved == 0
+        async with db.session() as session:
+            assert await live_claims(session) == ()
+        assert calls == []
+        assert (await gateway.infer(invocation(), "new")).state is RequestState.COMPLETED
+        assert calls == ["/v1/chat/completions"]

@@ -26,7 +26,7 @@ the token or an asserted user identity.
 | Access | Method and path | CLI / behavior |
 | --- | --- | --- |
 | Public | `GET /health/live` | `health --live`; process liveness |
-| Public | `GET /health/ready` | `health`; local service/DB readiness, not provider or NAS health |
+| Public | `GET /health/ready` | `health`; local service, SQLite, and spool readiness, not provider or NAS health |
 | Reader | `GET /api/v1/providers` | `providers`; configuration and credential-presence flags, not proof of working credentials |
 | Reader | `GET /api/v1/models` | `models`; enabled aliases, upstream IDs, and declared bounds |
 | Reader | `GET /api/v1/resources` | `resources`; observations, local storage and archive status even with metrics disabled |
@@ -38,6 +38,7 @@ the token or an asserted user identity.
 | Operator | `GET /api/v1/inference/{request_id}` | `inference status`; service-issued ID |
 | Operator | `POST /api/v1/inference/{request_id}/resolution` | `inference resolve`; audited outcome when unresolved |
 | Operator | `POST /api/v1/providers/{provider}/exhaustion/resolution` | HTTP only; independently confirmed recovery from the current inference denial |
+| Operator | `GET /api/v1/providers/{provider}/exhaustion/resolution` | Retrieve the current recovery observation ID, even after it expires |
 | Operator | `POST /api/v1/budgets/adjustments` | `budgets adjust`; audited adjustment to the current period |
 
 Use configured provider names and model **aliases**, not the upstream IDs.
@@ -185,6 +186,11 @@ denial. After a new independent check, an operator can submit the same original
 `request_id`, a new reason, and the current recovery receipt's `observation_id`
 to attest availability again. The observation ID must still be current and
 linked to that request; each successful confirmation returns a new ID.
+If the recovery response is lost, an operator can retrieve the current
+`provider`, `request_id`, `observation_id`, and `fresh_until` with
+`GET /api/v1/providers/{provider}/exhaustion/resolution`. The lookup does not
+extend freshness and returns `409 provider_exhaustion_target_changed` if there
+is no current operator confirmation (for example, a newer denial superseded it).
 Replaying an earlier body cannot extend freshness. A later inference denial
 requires a new independent confirmation targeting that denial.
 `GET /api/v1/resources` retains both source histories; the newest applicable

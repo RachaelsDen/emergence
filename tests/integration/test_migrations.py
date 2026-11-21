@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from alembic import command
 from alembic.config import Config
+from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 
 from emergence.storage.database import Database
@@ -26,6 +27,26 @@ async def test_readiness_does_not_create_a_missing_database(tmp_path: Path) -> N
     async with Database(path) as database:
         assert not await database.readiness()
     assert not path.exists()
+
+
+@pytest.mark.anyio
+async def test_wal_allows_writes_with_a_reader_and_is_required_for_readiness(
+    migrated_path: Path,
+) -> None:
+    statement = text("SELECT count(*) FROM providers")
+    async with Database(migrated_path) as database:
+        async with database.session() as reader:
+            assert await reader.scalar(statement) == 0
+            async with database.write() as writer:
+                await writer.execute(text("INSERT INTO providers VALUES ('new', 'openai')"))
+            assert await reader.scalar(statement) == 0
+        with closing(sqlite3.connect(migrated_path)) as connection:
+            assert connection.execute("PRAGMA journal_mode = DELETE").fetchone() == ("delete",)
+        assert not await database.readiness()
+        command.upgrade(Config(str(PROJECT / "alembic.ini")), "head")
+        assert await database.readiness()
+        async with database.session() as session:
+            assert await session.scalar(statement) == 1
 
 
 @pytest.mark.anyio

@@ -52,6 +52,9 @@ class OutcomeStore:
 
     async def fail_before_dispatch(self, request_id: str, code: str) -> None:
         async with self.database.write() as session:
+            state, _ = await read_state(session, request_id)
+            if state is not RequestState.ADMITTED:
+                return
             await self.ledger.release(session, request_id, self.clock(), code)
             await append_event(session, request_id, RequestState.FAILED, self.clock(), code=code)
 
@@ -169,14 +172,23 @@ class OutcomeStore:
             ArchiveReference(row.record_id, row.checksum, row.size_bytes)
         )
 
-    async def replay(self, session: AsyncSession, request_id: str) -> GatewayResult:
-        """Reconcile only durable output while the caller holds the SQLite writer."""
-        state, code = await read_state(session, request_id)
+    async def replay(self, request_id: str, *, active: bool) -> GatewayResult:
+        """Verify archive evidence outside the writer, then reconcile current state."""
+        async with self.database.session() as session:
+            state, code = await read_state(session, request_id)
+        if state is RequestState.ADMITTED and not active:
+            await self.fail_before_dispatch(request_id, "interrupted_before_dispatch")
+            return await self.get(request_id, replayed=True)
         outcome = await self._outcome(request_id)
-        if outcome is not None:
-            state, code = await self.finish(
-                session, outcome, RecordKey(request_id, "output").record_id
-            )
+        if outcome is not None and state not in {
+            RequestState.COMPLETED,
+            RequestState.FAILED,
+            RequestState.RESOLVED,
+        }:
+            async with self.database.write() as session:
+                state, code = await self.finish(
+                    session, outcome, RecordKey(request_id, "output").record_id
+                )
         return GatewayResult(
             request_id=request_id,
             state=state,

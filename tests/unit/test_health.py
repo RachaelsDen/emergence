@@ -75,6 +75,25 @@ async def test_unsafe_spool_is_a_readiness_failure(migrated_settings: Settings) 
 
 
 @pytest.mark.anyio
+async def test_running_service_detects_spool_permissions_change(
+    migrated_settings: Settings,
+) -> None:
+    application = create_app(migrated_settings)
+    async with (
+        application.router.lifespan_context(application),
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=application), base_url="http://test"
+        ) as client,
+    ):
+        assert (await client.get("/health/ready")).status_code == 200
+        migrated_settings.spool_path.chmod(0o755)
+        assert (await client.get("/health/live")).status_code == 200
+        assert (await client.get("/health/ready")).status_code == 503
+        migrated_settings.spool_path.chmod(0o700)
+        assert (await client.get("/health/ready")).status_code == 200
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize("kind", list(ProviderKind))
 async def test_provider_without_verified_quota_can_start_under_local_policy(
     migrated_settings: Settings, kind: ProviderKind

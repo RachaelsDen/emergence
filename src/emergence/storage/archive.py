@@ -132,6 +132,17 @@ class Spool:
     async def stats(self) -> SpoolStats:
         return await to_thread.run_sync(self._stats)
 
+    async def readiness(self) -> bool:
+        """Check the local spool without creating it or contacting the archive."""
+        try:
+            return await to_thread.run_sync(self._directory_usable)
+        except (OSError, SpoolError):
+            return False
+
+    def _directory_usable(self) -> bool:
+        self._check_directory()
+        return os.access(self._path, os.R_OK | os.W_OK | os.X_OK, effective_ids=True)
+
     async def ensure_capacity(
         self,
         session: AsyncSession,

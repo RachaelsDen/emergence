@@ -29,3 +29,11 @@ def test_redaction_does_not_expand_its_own_marker_on_archive_reentry() -> None:
     once = redactor.text("A E")
     assert once == "[REDACTED] [REDACTED]"
     assert redactor.text(once) == once
+
+
+def test_longer_secrets_starting_with_the_marker_are_not_shadowed() -> None:
+    secret = "[REDACTED]synthetic"
+    redactor = Redactor(("[RE", secret, f"{secret}-longer"))
+    once = redactor.text(f"prefix {secret}-longer {secret} [REDACTED]")
+    assert once == "prefix [REDACTED] [REDACTED] [REDACTED]"
+    assert redactor.text(once) == once

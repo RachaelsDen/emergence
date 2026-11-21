@@ -22,9 +22,14 @@ class Redactor:
     """Scrub known secrets and common credential fields recursively."""
 
     def __init__(self, secrets: tuple[str, ...] = ()) -> None:
-        values = tuple(sorted((secret for secret in secrets if secret), key=len, reverse=True))
+        values = tuple(secret for secret in secrets if secret)
         self._known = (
-            re.compile(r"\[REDACTED\]|" + "|".join(re.escape(secret) for secret in values))
+            re.compile(
+                "|".join(
+                    re.escape(value)
+                    for value in sorted((*values, "[REDACTED]"), key=len, reverse=True)
+                )
+            )
             if values
             else None
         )

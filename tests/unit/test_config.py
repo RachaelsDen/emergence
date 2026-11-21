@@ -9,10 +9,25 @@ from pydantic import ValidationError
 from emergence.config import (
     ConfigurationError,
     ProviderConfig,
+    ProviderKind,
     QuotaPolicy,
     Settings,
     load_settings,
 )
+
+
+@pytest.mark.parametrize("field", ["organization", "project"])
+@pytest.mark.parametrize("unsafe", ["org-é", "org\ninvalid", " org", "org\x7f"])
+def test_openai_scope_must_be_a_header_safe_identifier(field: str, unsafe: str) -> None:
+    with pytest.raises(ValidationError, match="OpenAI scope must be visible ASCII"):
+        ProviderConfig.model_validate(
+            {
+                "kind": ProviderKind.OPENAI,
+                "base_url": "https://fixture.invalid/v1",
+                "quota_policy": QuotaPolicy.LOCAL_LIMITS_ONLY,
+                field: unsafe,
+            }
+        )
 
 
 @pytest.mark.parametrize("provider", ["zai", "minimax", "openai", "llamacpp"])

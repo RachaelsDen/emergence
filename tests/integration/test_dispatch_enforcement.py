@@ -187,11 +187,11 @@ async def test_restart_before_dispatch_releases_reserved_funds(migrated_path: Pa
             await session.execute(
                 text(
                     "CREATE TRIGGER dispatch_fault BEFORE INSERT ON request_events "
-                    "WHEN NEW.kind = 'dispatched' "
+                    "WHEN NEW.kind IN ('dispatched', 'failed') "
                     "BEGIN SELECT RAISE(ABORT, 'simulated pre-dispatch crash'); END"
                 )
             )
-        with pytest.raises(IntegrityError, match="simulated pre-dispatch crash"):
+        with pytest.raises(GatewayError, match="local_storage_unavailable"):
             await gateway.infer(invocation(), "before-dispatch")
         async with database.write() as session:
             await session.execute(text("DROP TRIGGER dispatch_fault"))

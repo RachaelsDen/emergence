@@ -182,7 +182,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/health/ready")
     async def readiness() -> JSONResponse:
-        healthy = ready and await database.readiness()
+        healthy = ready and await database.readiness() and await spool.readiness()
         return JSONResponse(
             status_code=200 if healthy else 503,
             content={"status": "ready" if healthy else "not_ready"},

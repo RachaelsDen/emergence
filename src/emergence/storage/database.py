@@ -89,9 +89,11 @@ class Database:
                 await session.close()
 
     async def readiness(self) -> bool:
-        """Check the Alembic revision, table columns and authority triggers."""
+        """Check WAL mode, the Alembic revision, table columns and authority triggers."""
         try:
             async with self.session() as session:
+                if await session.scalar(text("PRAGMA journal_mode")) != "wal":
+                    return False
                 versions = await session.scalars(text("SELECT version_num FROM alembic_version"))
                 if tuple(versions) != (SCHEMA_HEAD,):
                     return False

@@ -1,5 +1,6 @@
 """Synthetic wire fixtures test normalization, feature admission, and error semantics."""
 
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Literal
 
@@ -316,6 +317,46 @@ async def test_oversized_response_is_bounded_and_reports_truncation() -> None:
     assert failure.value.code == "provider_response_too_large"
     assert failure.value.ambiguous
     assert failure.value.raw_response == "x" * 16
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("encoding", ["gzip", "deflate"])
+async def test_nonidentity_response_is_rejected_without_reading_body(encoding: str) -> None:
+    class UnreadableBody(httpx.AsyncByteStream):
+        def __aiter__(self) -> AsyncIterator[bytes]:
+            raise AssertionError("the encoded stream must not be read")
+
+    def respond(incoming: httpx.Request) -> httpx.Response:
+        assert incoming.headers["accept-encoding"] == "identity"
+        return httpx.Response(200, headers={"Content-Encoding": encoding}, stream=UnreadableBody())
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        with pytest.raises(
+            ProviderFailure, match="provider_response_encoding_unsupported"
+        ) as caught:
+            await Registry(configured(ProviderKind.ZAI), client).get("provider").infer(request())
+    assert caught.value.ambiguous
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [
+        (200, b'{"usage":{},"usage":null}'),
+        (200, rb'{"usage":{"prompt_tokens":1,"prompt_\u0074okens":2}}'),
+        (429, b'{"error":{"code":"rate_limit","code":"insufficient_quota"}}'),
+    ],
+)
+async def test_duplicate_members_preserve_conflicting_text_as_ambiguous_evidence(
+    status: int, body: bytes
+) -> None:
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _: httpx.Response(status, content=body))
+    ) as client:
+        with pytest.raises(ProviderFailure, match="provider_schema_error") as caught:
+            await Registry(configured(ProviderKind.ZAI), client).get("provider").infer(request())
+    assert caught.value.ambiguous
+    assert caught.value.raw_response == body.decode()
 
 
 @pytest.mark.anyio

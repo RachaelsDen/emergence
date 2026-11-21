@@ -25,6 +25,7 @@ from emergence.storage.repositories import ArchiveReference
     [
         ("usage", "configured-model", {"prompt_tokens": False, "completion_tokens": False}),
         ("compressed-body", "configured-model", {"prompt_tokens": 5, "completion_tokens": 3}),
+        ("duplicate-usage", "configured-model", {"prompt_tokens": 5, "completion_tokens": 3}),
         ("model", "other-model", {"prompt_tokens": 5, "completion_tokens": 3}),
         ("model", "m", {"prompt_tokens": 5, "completion_tokens": 3}),
         ("model", "Configured-model", {"prompt_tokens": 5, "completion_tokens": 3}),
@@ -57,7 +58,7 @@ from emergence.storage.repositories import ArchiveReference
 async def test_invalid_wire_response_preserves_hold_and_replays_without_dispatch(
     migrated_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    defect: Literal["usage", "compressed-body", "model"],
+    defect: Literal["usage", "compressed-body", "duplicate-usage", "model"],
     response_model: str,
     wire_usage: dict[str, JsonValue],
 ) -> None:
@@ -68,10 +69,17 @@ async def test_invalid_wire_response_preserves_hold_and_replays_without_dispatch
         "usage": wire_usage,
         "credential_echo": "synthetic-b1-inference",
     }
+    duplicate_usage = (
+        '{"model":"configured-model","choices":[{"message":{"content":"answer"}}],'
+        '"usage":{"prompt_tokens":1,"prompt_tokens":5,"completion_tokens":3},'
+        '"credential_echo":"synthetic-b1-inference"}'
+    )
     calls: list[str] = []
 
     def respond(request: httpx.Request) -> httpx.Response:
         calls.append(request.url.path)
+        if defect == "duplicate-usage":
+            return httpx.Response(200, content=duplicate_usage.encode())
         if defect != "compressed-body":
             return httpx.Response(200, json=payload)
         return httpx.Response(
@@ -86,7 +94,8 @@ async def test_invalid_wire_response_preserves_hold_and_replays_without_dispatch
             first.error_code
             == {
                 "usage": "provider_schema_error",
-                "compressed-body": "provider_transport_error",
+                "compressed-body": "provider_response_encoding_unsupported",
+                "duplicate-usage": "provider_schema_error",
                 "model": "provider_model_mismatch",
             }[defect]
         )
@@ -101,7 +110,12 @@ async def test_invalid_wire_response_preserves_hold_and_replays_without_dispatch
         record = await spool.read(ArchiveReference(record_id, row.checksum, row.size_bytes))
         outcome = ArchivedOutcome.model_validate_json(record.split(b"\n", 2)[2])
         assert outcome.failure is not None
-        if defect != "compressed-body":
+        if defect == "duplicate-usage":
+            assert outcome.failure.raw_response == duplicate_usage.replace(
+                "synthetic-b1-inference", "[REDACTED]"
+            )
+            assert b"synthetic-b1-inference" not in record
+        elif defect != "compressed-body":
             assert outcome.failure.raw_response == {**payload, "credential_echo": "[REDACTED]"}
             assert b"synthetic-b1-inference" not in record
         balance = await ledger.balance("p", NOW)

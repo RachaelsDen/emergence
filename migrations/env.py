@@ -29,6 +29,9 @@ def run_migrations() -> None:
             connection.exec_driver_sql("PRAGMA foreign_keys = ON")
             connection.exec_driver_sql("PRAGMA recursive_triggers = ON")
             connection.exec_driver_sql("PRAGMA busy_timeout = 1000")
+            # Set the persistent file mode before the migration transaction.
+            if connection.exec_driver_sql("PRAGMA journal_mode = WAL").scalar_one() != "wal":
+                raise RuntimeError("SQLite WAL mode could not be enabled")
             connection.exec_driver_sql("PRAGMA synchronous = FULL")
             connection.exec_driver_sql("BEGIN IMMEDIATE")
             context.configure(connection=connection, transactional_ddl=True)

@@ -112,37 +112,41 @@ async def render_metrics(gateway: Gateway, monitor: QuotaMonitor, timing: Infere
                     model=row.model_id,
                 )
             )
-        tokens = await session.execute(
+        usage = await session.stream(
             select(
                 usage_transactions.c.provider_id,
                 usage_transactions.c.model_id,
                 usage_transactions.c.request_id.is_not(None).label("request_usage"),
-                func.sum(usage_transactions.c.input_tokens).label("input"),
-                func.sum(usage_transactions.c.cached_input_tokens).label("cached"),
-                func.sum(usage_transactions.c.output_tokens).label("output"),
-            ).group_by(
-                usage_transactions.c.provider_id,
-                usage_transactions.c.model_id,
-                usage_transactions.c.request_id.is_not(None),
-            )
+                usage_transactions.c.input_tokens,
+                usage_transactions.c.cached_input_tokens,
+                usage_transactions.c.output_tokens,
+            ).execution_options(yield_per=512)
         )
-        for row in tokens:
+        # Each stored counter fits SQLite's signed integer type; its sum
+        # need not. Stream rows and use Python's exact, unbounded integers.
+        tokens: dict[tuple[str, str | None, bool, str], int] = {}
+        async for row in usage:
             for dimension, count in (
-                ("input", row.input),
-                ("cached_input", row.cached),
-                ("output", row.output),
+                ("input", row.input_tokens),
+                ("cached_input", row.cached_input_tokens),
+                ("output", row.output_tokens),
             ):
                 if count is not None:
-                    lines.append(
-                        _sample(
-                            "emergence_observed_tokens_total",
-                            count,
-                            provider=row.provider_id,
-                            model=row.model_id or "unattributed",
-                            source="request" if row.request_usage else "provider_report",
-                            dimension=dimension,
-                        )
-                    )
+                    key = (row.provider_id, row.model_id, row.request_usage, dimension)
+                    tokens[key] = tokens.get(key, 0) + count
+        for (provider, model, request_usage, dimension), count in sorted(
+            tokens.items(), key=lambda item: (item[0][0], item[0][1] or "", *item[0][2:])
+        ):
+            lines.append(
+                _sample(
+                    "emergence_observed_tokens_total",
+                    count,
+                    provider=provider,
+                    model=model or "unattributed",
+                    source="request" if request_usage else "provider_report",
+                    dimension=dimension,
+                )
+            )
     for (provider, model), observation in timing.timings.items():
         lines.extend(
             (
