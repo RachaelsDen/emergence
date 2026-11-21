@@ -5,13 +5,16 @@ import os
 import re
 import shutil
 import stat
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Final
+from weakref import WeakValueDictionary
 
-from anyio import to_thread
+from anyio import Lock, to_thread
 from pydantic import JsonValue
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -30,6 +33,16 @@ from .repositories import (
 _RECORD: Final = re.compile(r"[a-f0-9]{64}")
 _STAGING: Final = re.compile(r"\.stage-[a-zA-Z0-9_-]+")
 _FORMAT: Final = b"emergence-spool-v1"
+type _DirectoryVersion = tuple[int, int, int, int]
+
+
+class _DirectoryUsage:
+    def __init__(self) -> None:
+        self.lock = Lock()
+        self.snapshot: tuple[_DirectoryVersion, int] | None = None
+
+
+_DIRECTORY_USAGE: Final[WeakValueDictionary[Path, _DirectoryUsage]] = WeakValueDictionary()
 
 
 class SpoolError(RuntimeError):
@@ -119,6 +132,8 @@ class Spool:
         self._redactor = redactor
         self._limit = limit_bytes
         self._headroom = headroom_bytes
+        # Share accounting across handles to a protected directory in this core.
+        self._usage = _DIRECTORY_USAGE.setdefault(self._path, _DirectoryUsage())
         self.archive = (
             MountedArchive(archive_path, archive_mount_path or archive_path, self._path)
             if archive_path is not None
@@ -143,6 +158,14 @@ class Spool:
         self._check_directory()
         return os.access(self._path, os.R_OK | os.W_OK | os.X_OK, effective_ids=True)
 
+    @asynccontextmanager
+    async def capacity_write(self) -> AsyncGenerator[AsyncSession]:
+        """Refresh the usage cache before taking the SQLite writer."""
+        async with self._usage.lock:
+            await to_thread.run_sync(self._refresh_usage)
+            async with self._db.write() as session:
+                yield session
+
     async def ensure_capacity(
         self,
         session: AsyncSession,
@@ -165,10 +188,10 @@ class Spool:
                 raise SpoolError("spool_claim_exceeded")
             reduction = record_size
         remaining = sum(claim.remaining_bytes for claim in claims) - reduction
-        stats = await self.stats()
-        if stats.used_bytes + remaining + additional_bytes > self._limit:
+        used, free = await to_thread.run_sync(self._capacity_usage)
+        if used + remaining + additional_bytes > self._limit:
             raise SpoolError("spool_capacity_exhausted")
-        if stats.free_bytes < self._headroom + remaining + additional_bytes:
+        if free < self._headroom + remaining + additional_bytes:
             raise SpoolError("local_disk_headroom_exhausted")
 
     async def publish(
@@ -177,7 +200,7 @@ class Spool:
         """Redact and durably publish an immutable JSON record, then commit its reference."""
         record = self._prepare(key, payload)
         reference = record.reference
-        async with self._db.write() as session:
+        async with self.capacity_write() as session:
             existing = (
                 await session.execute(
                     select(archive_references).where(
@@ -207,7 +230,7 @@ class Spool:
                     record_id=reference.record_id,
                     record_size=reference.size_bytes,
                 )
-                await to_thread.run_sync(self._publish, record)
+                await to_thread.run_sync(self._publish_counted, record, present)
             await register_archive_reference(session, reference)
         return reference
 
@@ -235,9 +258,13 @@ class Spool:
         """Local-only; caller holds the writer after verified delivery and committed ACK."""
         if not _RECORD.fullmatch(reference.record_id):
             raise SpoolError("invalid_record_id")
-        self._check_directory()
-        (self._path / reference.record_id).unlink()
+        used = self._indexed_bytes()
+        self._usage.snapshot = None
+        path = self._path / reference.record_id
+        size = path.lstat().st_size
+        path.unlink()
         _fsync_directory(self._path)
+        self._usage.snapshot = self._directory_version(), used - size
 
     def _read_reference(self, reference: ArchiveReference) -> bytes:
         self._check_directory()
@@ -248,16 +275,22 @@ class Spool:
 
     async def recover(self) -> None:
         """Reconcile durable files and rows; do not silently drop corrupt or missing data."""
-        async with self._db.write() as session:
-            known = await list_archive_references(session)
-            archived = set(
-                await session.scalars(
-                    select(archive_outbox.c.record_id).where(archive_outbox.c.state == "archived")
+        async with self._usage.lock:
+            self._usage.snapshot = None
+            async with self._db.session() as session:
+                known = await list_archive_references(session)
+                archived = set(
+                    await session.scalars(
+                        select(archive_outbox.c.record_id).where(
+                            archive_outbox.c.state == "archived"
+                        )
+                    )
                 )
-            )
-            recovered = await to_thread.run_sync(self._scan, known, archived)
-            for reference in recovered:
-                await register_archive_reference(session, reference)
+            recovered, version = await to_thread.run_sync(self._scan, known, archived)
+            async with self._db.write() as session:
+                for reference in recovered:
+                    await register_archive_reference(session, reference)
+            self._usage.snapshot = version, sum(reference.size_bytes for reference in recovered)
 
     def _ensure_directory(self) -> None:
         try:
@@ -267,10 +300,48 @@ class Spool:
             self._check_directory()
         _fsync_directory(self._path.parent)
 
-    def _check_directory(self) -> None:
+    def _check_directory(self) -> os.stat_result:
         metadata = self._path.lstat()
         if metadata.st_uid != os.geteuid() or metadata.st_mode != stat.S_IFDIR | 0o700:
             raise SpoolError("unsafe_spool_directory")
+        return metadata
+
+    def _directory_version(self) -> _DirectoryVersion:
+        metadata = self._check_directory()
+        return metadata.st_dev, metadata.st_ino, metadata.st_ctime_ns, metadata.st_mtime_ns
+
+    def _refresh_usage(self) -> None:
+        try:
+            version = self._directory_version()
+        except FileNotFoundError:
+            self._ensure_directory()
+            version = self._directory_version()
+        snapshot = self._usage.snapshot
+        if snapshot is not None and snapshot[0] == version:
+            return
+        self._usage.snapshot = None
+        scanned = self._stats()
+        if self._directory_version() != version:
+            raise SpoolError("spool_contents_changed")
+        self._usage.snapshot = version, scanned.used_bytes
+
+    def _indexed_bytes(self) -> int:
+        snapshot = self._usage.snapshot
+        if snapshot is None or snapshot[0] != self._directory_version():
+            raise SpoolError("spool_contents_changed")
+        return snapshot[1]
+
+    def _capacity_usage(self) -> tuple[int, int]:
+        return self._indexed_bytes(), shutil.disk_usage(self._path).free
+
+    def _publish_counted(self, record: _Record, present: bool) -> None:
+        used = self._indexed_bytes()
+        self._usage.snapshot = None
+        self._publish(record)
+        self._usage.snapshot = (
+            self._directory_version(),
+            used + (0 if present else record.reference.size_bytes),
+        )
 
     def _read(self, record_id: str) -> _Record:
         if _RECORD.fullmatch(record_id) is None:
@@ -349,7 +420,7 @@ class Spool:
 
     def _scan(
         self, known: tuple[ArchiveReference, ...], archived: set[str]
-    ) -> tuple[ArchiveReference, ...]:
+    ) -> tuple[tuple[ArchiveReference, ...], _DirectoryVersion]:
         self._ensure_directory()
         discovered: dict[str, ArchiveReference] = {}
         stages: list[Path] = []
@@ -371,7 +442,7 @@ class Spool:
         for stage in stages:
             stage.unlink()
         _fsync_directory(self._path)
-        return tuple(discovered.values())
+        return tuple(discovered.values()), self._directory_version()
 
 
 async def _archived(session: AsyncSession, reference: ArchiveReference) -> bool:

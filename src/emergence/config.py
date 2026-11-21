@@ -28,6 +28,7 @@ from yaml.nodes import MappingNode, ScalarNode
 type PositiveInt = Annotated[int, Field(gt=0)]
 type EnvName = Annotated[str, Field(pattern=r"^[A-Z][A-Z0-9_]*$")]
 ModelAlias = Annotated[str, Field(min_length=1, max_length=128)]
+ProviderName = Annotated[str, Field(min_length=1, max_length=128)]
 MONTHLY_BUDGET_USD: Final = Decimal("100")
 
 
@@ -213,7 +214,7 @@ class Settings(BaseSettings):
     accounting_timezone: str = "UTC"
     operator_token_env: EnvName = "EMERGENCE_OPERATOR_TOKEN"
     reader_token_env: EnvName = "EMERGENCE_READER_TOKEN"
-    providers: dict[str, ProviderConfig] = Field(default_factory=dict)
+    providers: dict[ProviderName, ProviderConfig] = Field(default_factory=dict)
     prices: tuple[PriceConfig, ...] = ()
     metrics_enabled: bool = False
     spool_limit_bytes: PositiveInt = 256 * 1024 * 1024

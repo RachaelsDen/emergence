@@ -2,6 +2,7 @@
 
 import json
 import re
+from collections.abc import Iterator
 from decimal import Decimal, DecimalException
 from typing import Annotated, Final
 
@@ -13,6 +14,7 @@ type WireValue = str | int | Decimal | bool | None | list[WireValue] | dict[str,
 type WireObject = dict[str, WireValue]
 type Counter = Annotated[StrictInt, Field(ge=0)]
 _CATEGORY: Final = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
+_MAX_JSON_DEPTH: Final = 64
 
 
 def _invalid_constant(_: str) -> None:
@@ -38,6 +40,19 @@ def decode_body(body: bytes) -> WireObject:
         raise ReportingError(ReportingIssue.INVALID_JSON) from None
     if not isinstance(value, dict):
         raise ReportingError(ReportingIssue.INVALID_SCHEMA)
+    # Raw pages are later traversed recursively for archival and redaction.
+    # Check all containers here, including fields the normalizers ignore.
+    levels: list[Iterator[WireValue]] = [iter(value.values())]
+    while levels:
+        try:
+            node = next(levels[-1])
+        except StopIteration:
+            levels.pop()
+            continue
+        if isinstance(node, (dict, list)):
+            if len(levels) == _MAX_JSON_DEPTH:
+                raise ReportingError(ReportingIssue.INVALID_JSON)
+            levels.append(iter(node.values()) if isinstance(node, dict) else iter(node))
     return value
 
 

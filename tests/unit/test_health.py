@@ -9,6 +9,9 @@ from alembic.config import Config
 
 from emergence.api.app import create_app
 from emergence.config import ProviderConfig, ProviderKind, QuotaPolicy, Settings
+from emergence.resources.ledger import BudgetLedger
+from emergence.storage.database import Database
+from emergence.storage.repositories import ensure_catalog
 
 
 @pytest.fixture
@@ -90,6 +93,41 @@ async def test_running_service_detects_spool_permissions_change(
         assert (await client.get("/health/live")).status_code == 200
         assert (await client.get("/health/ready")).status_code == 503
         migrated_settings.spool_path.chmod(0o700)
+        assert (await client.get("/health/ready")).status_code == 200
+
+
+@pytest.mark.anyio
+async def test_changed_accounting_timezone_fails_readiness_with_existing_period(
+    migrated_settings: Settings, capsys: pytest.CaptureFixture[str]
+) -> None:
+    settings = migrated_settings.model_copy(
+        update={
+            "providers": {
+                "cloud": ProviderConfig(
+                    kind=ProviderKind.ZAI,
+                    base_url="https://fixture.invalid/v1",
+                    quota_policy=QuotaPolicy.LOCAL_LIMITS_ONLY,
+                )
+            }
+        }
+    )
+    async with Database(settings.database_path) as db:
+        await ensure_catalog(db, settings)
+        assert (await BudgetLedger(settings, db).balance("cloud")).period_id is not None
+    changed = settings.model_copy(update={"accounting_timezone": "Asia/Tokyo"})
+    app = create_app(changed)
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client,
+    ):
+        assert (await client.get("/health/live")).status_code == 200
+        assert (await client.get("/health/ready")).status_code == 503
+    assert "accounting_timezone_changed" in capsys.readouterr().err
+    app = create_app(settings)
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client,
+    ):
         assert (await client.get("/health/ready")).status_code == 200
 
 

@@ -134,6 +134,29 @@ def test_configured_model_alias_has_the_same_bounds_as_inference(length: int) ->
             InferenceRequest.model_validate(request)
 
 
+@pytest.mark.parametrize("length", [0, 1, 128, 129])
+def test_configured_provider_name_has_the_same_bounds_as_inference(length: int) -> None:
+    name = "p" * length
+    config = {
+        "providers": {
+            name: {
+                "kind": "llamacpp",
+                "quota_policy": "local_limits_only",
+                "base_url": "https://fixture.invalid",
+            }
+        }
+    }
+    request = {"provider": name, "model": "m", "messages": (Message(role="user", content="x"),)}
+    if length in (1, 128):
+        assert name in Settings.model_validate(config).providers
+        assert InferenceRequest.model_validate(request).provider == name
+    else:
+        with pytest.raises(ValidationError):
+            Settings.model_validate(config)
+        with pytest.raises(ValidationError):
+            InferenceRequest.model_validate(request)
+
+
 @pytest.mark.parametrize("explicit", [True, False])
 def test_yaml_environment_overrides_retain_siblings(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, explicit: bool

@@ -23,7 +23,14 @@ from emergence.storage.models import (
 from emergence.telemetry.logging import Redactor
 
 from .audit import record_audit
-from .budgets import AdjustmentReceipt, find_period, month, period, projection
+from .budgets import (
+    AdjustmentReceipt,
+    find_period,
+    month,
+    period,
+    projection,
+    validate_accounting_timezone,
+)
 from .budgets import BudgetBalance as BudgetBalance
 from .pricing import BudgetError as BudgetError
 from .pricing import check_money, effective, install_prices, rates, stamp, version_key
@@ -39,6 +46,7 @@ class BudgetLedger:
 
     async def initialize(self) -> None:
         async with self.database.write() as session:
+            await validate_accounting_timezone(session, self.settings)
             await install_prices(session, self.settings, self._redactor)
 
     async def reserve(

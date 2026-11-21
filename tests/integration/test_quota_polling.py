@@ -109,6 +109,34 @@ def cost(amount: str, project: str = "proj_fixture") -> str:
 
 
 @pytest.mark.anyio
+async def test_reporting_depth_limit_records_unavailable_and_allows_later_poll(
+    migrated_path: Path,
+) -> None:
+    settings = Settings(providers={"p": config(ProviderKind.MINIMAX)})
+    calls = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        depth = 64 if calls == 1 else 63  # The root object is also a container.
+        body = b'{"unknown":' + b"[" * depth + b"null" + b"]" * depth + b"}"
+        return httpx.Response(200, content=body)
+
+    async with monitor_for(migrated_path, settings, handler) as (monitor, db):
+        (rejected,) = await monitor.poll_once("p")
+        assert (rejected.status, rejected.issue) == ("unavailable", ReportingIssue.INVALID_JSON)
+        (accepted,) = await monitor.poll_once("p")
+        assert accepted.status == "experimental"
+        async with db.session() as session:
+            rows = (
+                await session.execute(
+                    select(quota_observations.c.status).order_by(quota_observations.c.id)
+                )
+            ).scalars()
+            assert tuple(rows) == ("unavailable", "experimental")
+
+
+@pytest.mark.anyio
 async def test_complete_openai_reports_persist_exact_idempotent_deltas(migrated_path: Path) -> None:
     settings = Settings(providers={"o": config(ProviderKind.OPENAI)})
     val = "7.00000000000000000000000000000000000001"

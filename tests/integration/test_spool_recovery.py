@@ -1,18 +1,64 @@
 import json
 from hashlib import sha256
 from pathlib import Path
+from threading import Event
 
 import pytest
 from anyio import Path as AsyncPath
+from anyio import create_task_group, fail_after, to_thread
 from pydantic import JsonValue
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from test_migrations import migrated_path as migrated_path
 
-from emergence.storage.archive import RecordKey, Spool, SpoolError
+from emergence.storage.archive import RecordKey, Spool, SpoolError, SpoolStats
 from emergence.storage.database import Database
 from emergence.storage.repositories import list_archive_references
 from emergence.telemetry.logging import Redactor
+
+
+@pytest.mark.anyio
+async def test_spool_scan_runs_outside_writer_and_publish_updates_usage(
+    migrated_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    entered, release = Event(), Event()
+    directory = tmp_path / "spool"
+    directory.mkdir(mode=0o700)
+    (directory / ".stage-incomplete").write_bytes(b"s" * 160)
+    async with Database(migrated_path) as db:
+        spool = Spool(directory, db, Redactor(), limit_bytes=400, headroom_bytes=0)
+        stats = spool._stats  # pyright: ignore[reportPrivateUsage]
+        scans = 0
+
+        def paused_scan() -> SpoolStats:
+            nonlocal scans
+            scans += 1
+            entered.set()
+            if not release.wait(4):
+                raise AssertionError("scan was not released")
+            return stats()
+
+        async def publish() -> None:
+            await spool.publish(RecordKey("first", "fixture"), "x" * 150)
+
+        monkeypatch.setattr(spool, "_stats", paused_scan)
+        with fail_after(5):
+            async with create_task_group() as tasks:
+                tasks.start_soon(publish)
+                try:
+                    assert await to_thread.run_sync(entered.wait, 2)
+                    async with db.write() as session:
+                        await session.execute(text("INSERT INTO providers VALUES ('p', 'zai')"))
+                finally:
+                    release.set()
+        # Both the staged bytes and the committed file count against the limit.
+        with pytest.raises(SpoolError, match="spool_capacity_exhausted"):
+            await spool.publish(RecordKey("second", "fixture"), "small")
+        assert scans == 1
+
+        (directory / ".stage-incomplete").unlink()
+        await spool.publish(RecordKey("second", "fixture"), "small")
+        assert scans == 2
 
 
 @pytest.mark.anyio

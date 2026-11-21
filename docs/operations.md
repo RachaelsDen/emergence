@@ -137,9 +137,12 @@ Missing effective rates are not an estimate of zero spend.
 Each cloud provider has one USD 100 virtual budget shared by its users, not
 one per request, model or future agent. Periods are calendar months with
 `accounting_timezone: UTC` by default (configurable IANA zone), no rollover,
-and preserved history. The ledger reserves before dispatch and settles with
-the admitted price version; missing cloud usage can retain the full hold
-pending audited investigation. Grants, reductions and corrections affect
+and preserved history. Choose the timezone before opening a cloud budget period.
+Changing it for an enabled provider with an existing ledger is not supported:
+readiness fails with `accounting_timezone_changed` in the log. Restore the
+stored zone; do not edit historical periods. The ledger reserves before
+dispatch and settles with the admitted price version; missing cloud usage can
+retain the full hold pending audited investigation. Grants, reductions and corrections affect
 virtual accounting, not provider credits. Avoid multiple configured names
 for one intended OpenAI account scope: exposure is provider-name keyed.
 The opening is fixed at USD 100; the compatibility `monthly_budget` setting

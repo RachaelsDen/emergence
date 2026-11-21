@@ -5,7 +5,7 @@ from typing import Annotated, Literal, Self
 from pydantic import Field, JsonValue, model_validator
 from pydantic_core import PydanticCustomError
 
-from emergence.config import ModelAlias, SafeModel
+from emergence.config import ModelAlias, ProviderName, SafeModel
 
 # Normalized counts must fit the SQLite INTEGER accounting columns.
 TokenCount = Annotated[int, Field(strict=True, ge=0, le=2**63 - 1)]
@@ -17,7 +17,7 @@ class Message(SafeModel):
 
 
 class InferenceRequest(SafeModel):
-    provider: Annotated[str, Field(min_length=1, max_length=128)]
+    provider: ProviderName
     model: ModelAlias
     messages: Annotated[tuple[Message, ...], Field(min_length=1, max_length=128)]
     max_output_tokens: Annotated[int, Field(gt=0, le=131072)] = 128

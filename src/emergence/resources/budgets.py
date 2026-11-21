@@ -65,6 +65,21 @@ def month(at: datetime, zone: str) -> tuple[datetime, datetime]:
     return start.astimezone(UTC), following.astimezone(UTC)
 
 
+async def validate_accounting_timezone(session: AsyncSession, settings: Settings) -> None:
+    """Do not serve a changed calendar for an established provider ledger."""
+    for provider, config in settings.providers.items():
+        if not config.enabled or config.kind is ProviderKind.LLAMACPP:
+            continue
+        stored = await session.scalar(
+            select(budget_periods.c.timezone)
+            .where(budget_periods.c.provider_id == provider)
+            .order_by(budget_periods.c.ends_at.desc())
+            .limit(1)
+        )
+        if stored is not None and stored != settings.accounting_timezone:
+            raise BudgetError("accounting_timezone_changed")
+
+
 async def find_period(
     session: AsyncSession, provider: str, start: datetime, end: datetime
 ) -> BudgetPeriod | None:

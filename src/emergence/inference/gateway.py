@@ -84,7 +84,7 @@ class Gateway:
         fingerprint = sha256(canonical).hexdigest()
         identity = sha256(idempotency_key.encode("utf-8")).hexdigest()
         now = self.clock().astimezone(UTC)
-        async with self.database.write() as session:
+        async with self.spool.capacity_write() as session:
             existing = (
                 await session.execute(
                     select(requests.c.id, requests.c.input_fingerprint).where(

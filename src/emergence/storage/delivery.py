@@ -284,6 +284,6 @@ class ArchiveDelivery:
         return False
 
     async def _reclaim(self, ref: ArchiveReference) -> None:
-        async with self.database.write() as session:
+        async with self.spool.capacity_write() as session:
             if not await _pinned(session, ref.record_id):
                 await to_thread.run_sync(self.spool.reclaim, ref)
