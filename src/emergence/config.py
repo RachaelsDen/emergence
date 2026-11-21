@@ -19,7 +19,7 @@ from pydantic import (
     model_validator,
 )
 from pydantic_core import PydanticCustomError
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
 type PositiveInt = Annotated[int, Field(gt=0)]
 type EnvName = Annotated[str, Field(pattern=r"^[A-Z][A-Z0-9_]*$")]
@@ -169,6 +169,18 @@ class Settings(BaseSettings):
     requests_per_minute: PositiveInt = 30
     poll_concurrency: PositiveInt = 4
     enforce_budgets: bool = True
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        """Environment overrides constructor/YAML values, with nested sibling merging."""
+        return env_settings, init_settings
 
     @model_validator(mode="after")
     def validate_timezone(self) -> Self:

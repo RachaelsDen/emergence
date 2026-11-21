@@ -38,12 +38,85 @@ def test_missing_or_unknown_policy_rejected(policy: str | None) -> None:
         )
 
 
-def test_invalid_config_never_exposes_input(tmp_path: Path) -> None:
+@pytest.mark.parametrize("contents", ["password: SENTINEL_SECRET\n", "", "[]", "[invalid"])
+def test_invalid_config_never_exposes_input(tmp_path: Path, contents: str) -> None:
     config = tmp_path / "invalid.yaml"
-    config.write_text("password: SENTINEL_SECRET\n", encoding="utf-8")
+    config.write_text(contents, encoding="utf-8")
     with pytest.raises(ConfigurationError) as captured:
         load_settings(config)
     assert str(captured.value) == "configuration_invalid"
+
+
+@pytest.mark.parametrize("explicit", [True, False])
+def test_yaml_environment_overrides_retain_siblings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, explicit: bool
+) -> None:
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "host: localhost\nport: 8001\n"
+        "providers:\n"
+        "  local:\n"
+        "    kind: llamacpp\n"
+        "    quota_policy: local_limits_only\n"
+        "    base_url: http://127.0.0.1:9999/v1\n"
+        "    concurrency: 2\n"
+        "    models:\n"
+        "      small:\n"
+        "        id: fixture-model\n"
+        "        max_output_tokens: 128\n",
+        encoding="utf-8",
+    )
+    alternate = tmp_path / "alternate.yaml"
+    alternate.write_text("password: SENTINEL_SECRET\n", encoding="utf-8")
+    monkeypatch.setenv("EMERGENCE_CONFIG", str(alternate if explicit else config))
+    monkeypatch.setenv("EMERGENCE_HOST", "127.0.0.2")
+    monkeypatch.setenv("EMERGENCE_PORT", "8123")
+    monkeypatch.setenv("EMERGENCE_PROVIDERS__LOCAL__CONCURRENCY", "3")
+    monkeypatch.setenv("EMERGENCE_PROVIDERS__LOCAL__MODELS__SMALL__MAX_OUTPUT_TOKENS", "64")
+
+    settings = load_settings(config if explicit else None)
+
+    assert (settings.host, settings.port) == ("127.0.0.2", 8123)
+    provider = settings.providers["local"]
+    assert provider.concurrency == 3
+    assert provider.kind.value == "llamacpp"
+    assert provider.quota_policy is QuotaPolicy.LOCAL_LIMITS_ONLY
+    assert provider.base_url == "http://127.0.0.1:9999/v1"
+    assert provider.models["small"].id == "fixture-model"
+    assert provider.models["small"].max_output_tokens == 64
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("PORT", "SENTINEL_SECRET"),
+        ("PROVIDERS__LOCAL__BASE_URL", "https://user:SENTINEL_SECRET@fixture.invalid"),
+        ("PROVIDERS__LOCAL__MONTHLY_BUDGET", "99"),
+        ("PROVIDERS", '{"credential": "SENTINEL_SECRET"'),
+    ],
+)
+def test_invalid_environment_override_never_exposes_input(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, value: str
+) -> None:
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "port: 8001\n"
+        "providers:\n"
+        "  local:\n"
+        "    kind: llamacpp\n"
+        "    quota_policy: local_limits_only\n"
+        "    base_url: http://127.0.0.1:9999/v1\n"
+        "    monthly_budget: 100\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(f"EMERGENCE_{name}", value)
+
+    with pytest.raises(ConfigurationError) as captured:
+        load_settings(config)
+
+    assert str(captured.value) == "configuration_invalid"
+    assert captured.value.__cause__ is None
+    assert captured.value.__suppress_context__
 
 
 def test_invalid_timezone_rejected() -> None:
