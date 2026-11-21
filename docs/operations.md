@@ -164,6 +164,32 @@ confidence, scope and available provenance in `/api/v1/resources`.
 Known USD capacity includes local commitments not covered by its snapshot,
 including an earlier call still in flight when that snapshot was observed.
 
+An inference-observed exhaustion denial remains blocking across time, restarts,
+and virtual-month renewal. Reporting for another resource cannot clear it.
+After independently confirming replenishment for the intended provider account,
+an operator can use the authenticated
+`POST /api/v1/providers/{provider}/exhaustion/resolution` endpoint documented in
+[the API contract](api.md), supplying the service-issued request ID of the
+current denial and a bounded evidence-based reason. Do not put credentials in
+the reason. There is no automatic expiry, provider retry, or inference dispatch
+in this operation.
+
+The operation appends a boolean availability assertion and an audit event
+atomically after archiving redacted evidence; it preserves the original denial.
+A crash or concurrent denial between archive publication and the transaction
+can leave an unreferenced recovery detail record, which does not authorize
+admission. A duplicate or stale confirmation returns `409`. Inspect the current
+resource and request history before deciding whether a new confirmation is
+warranted. The API does not confirm any actual credit amount, release ambiguous
+holds, reset OpenAI safety exposure, or override another known exhausted
+resource. Those independent gates can still deny inference after recovery.
+For `require_fresh`, the assertion lasts only `stale_after_seconds`; a stale
+assertion remains unknown under that policy and cannot be renewed by replaying
+the old denial's resolution. After independently checking availability again,
+include the current recovery receipt's `observation_id` in a new confirmation.
+The API rejects a stale ID, so renewed evidence cannot clear a newer denial or
+refresh authority by replaying an old confirmation.
+
 ## Archive, retention and monitoring
 
 Set `archive_path` to a protected NAS-backed directory; set the optional

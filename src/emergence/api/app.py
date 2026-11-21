@@ -18,6 +18,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.requests import Request
 
 from emergence.api.dependencies import RequestBodyLimit, Services
+from emergence.api.provider_recovery import install_provider_recovery
 from emergence.api.routes import install_routes
 from emergence.config import ConfigurationError, Settings, load_settings
 from emergence.inference.gateway import Gateway, GatewayError
@@ -134,6 +135,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         timeout=config.request_body_timeout_seconds,
     )
     install_routes(app, config, active_services)
+    install_provider_recovery(app, config, active_services)
 
     @app.exception_handler(StarletteHTTPException)
     async def http_error(_request: Request, error: StarletteHTTPException) -> JSONResponse:

@@ -37,6 +37,7 @@ the token or an asserted user identity.
 | Operator | `POST /api/v1/inference` | `inference test`; bounded, non-streaming request |
 | Operator | `GET /api/v1/inference/{request_id}` | `inference status`; service-issued ID |
 | Operator | `POST /api/v1/inference/{request_id}/resolution` | `inference resolve`; audited outcome when unresolved |
+| Operator | `POST /api/v1/providers/{provider}/exhaustion/resolution` | HTTP only; independently confirmed recovery from the current inference denial |
 | Operator | `POST /api/v1/budgets/adjustments` | `budgets adjust`; audited adjustment to the current period |
 
 Use configured provider names and model **aliases**, not the upstream IDs.
@@ -127,3 +128,48 @@ emergence --token-env EMERGENCE_OPERATOR_TOKEN inference resolve "$SERVICE_REQUE
 For `POST /api/v1/inference/{request_id}/resolution`, send
 `{"amount":"0.004","reason":"Estimated from confirmed usage and retained rates"}`
 or `{"amount":null,"reason":"Provider confirmed this request incurred no charge"}`.
+
+Provider exhaustion has a separate recovery operation. After independently
+confirming replenishment for the configured provider account, send
+`POST /api/v1/providers/{provider}/exhaustion/resolution` with operator
+authorization and this body:
+
+```json
+{
+  "request_id": "0123456789abcdef0123456789abcdef",
+  "reason": "Confirmed replenishment for this account in the provider console"
+}
+```
+
+Use the service-issued request ID of the **current** inference exhaustion
+denial, not its idempotency key. IDs must be 32 lowercase hexadecimal characters.
+The reason is trimmed, must be nonblank, and is limited to 2,000 characters.
+Successful `200` responses contain `provider`, `request_id`,
+`resolved_observation_id`, `observation_id`, `audit_event_id`, `observed_at`,
+and `fresh_until`. The immutable audit records the authenticated operator role,
+timestamp, original observation/request, and redacted reason. Recovery appends
+an `inference` observation with `source: operator`,
+`confidence: operator_confirmed_recovery`, `unit: availability`, and
+`remaining: "1"`. This is a boolean availability assertion, not a monetary
+balance or provider-measured credit.
+
+Unknown or disabled providers return `404 provider_not_found`; local providers
+return `400 provider_recovery_not_supported`. A wrong, absent, already resolved,
+or superseded target returns `409 provider_exhaustion_target_changed`. The
+service checks the target again under the database writer, so a concurrent newer
+denial cannot be cleared by an older confirmation. A regressed clock that would
+rank the recovery before the denial also returns `409`. Invalid bodies return
+`422 invalid_request`; the usual `401`/`403` authorization rules apply.
+
+Recovery dispatches no inference and changes no ledger entries, holds, other
+resource observations, or safety limits. It does not rewrite the denial.
+The assertion is fresh for the provider's configured `stale_after_seconds`;
+`require_fresh` blocks once it is stale. Expiration does not reapply the old
+denial. After a new independent check, an operator can submit the same original
+`request_id`, a new reason, and the current recovery receipt's `observation_id`
+to attest availability again. The observation ID must still be current and
+linked to that request; each successful confirmation returns a new ID.
+Replaying an earlier body cannot extend freshness. A later inference denial
+requires a new independent confirmation targeting that denial.
+`GET /api/v1/resources` retains both source histories; the newest applicable
+observation for the inference resource governs admission.
