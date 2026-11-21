@@ -11,7 +11,12 @@ from emergence.inference.errors import GatewayError
 from emergence.inference.schemas import InferenceRequest
 from emergence.storage.capacity import live_claims
 from emergence.storage.gateway_state import request_capacity
-from emergence.storage.models import quota_observations, request_reservations, requests
+from emergence.storage.models import (
+    quota_observations,
+    request_reservations,
+    requests,
+    usage_transactions,
+)
 
 
 async def check_quota(
@@ -38,38 +43,60 @@ async def check_quota(
         .label("rank"),
     ).where(quota_observations.c.provider_id == invocation.provider)
     latest = ordered.subquery()
-    latest_ids = {
-        row.resource: row.id
-        for row in await session.execute(
-            select(latest.c.resource, latest.c.id).where(latest.c.rank == 1)
-        )
+    latest_rows = {
+        row.resource: row for row in await session.execute(select(latest).where(latest.c.rank == 1))
     }
     ranked = ordered.where(
         quota_observations.c.status.in_(("verified", "observed")),
         quota_observations.c.remaining.is_not(None),
     ).subquery()
-    rows = (await session.execute(select(ranked).where(ranked.c.rank == 1))).all()
+    rows = {
+        row.resource: row for row in await session.execute(select(ranked).where(ranked.c.rank == 1))
+    }
+    for resource, row in latest_rows.items():
+        if row.remaining is not None or row.quota_limit is not None or row.status == "unavailable":
+            rows.setdefault(resource, row)
     claims = await live_claims(session)
     active = {claim.request_id for claim in claims}
     commitments = (
         await session.execute(
-            select(request_capacity, request_reservations.c.amount.label("reserved_usd"))
+            select(
+                request_capacity,
+                func.coalesce(
+                    usage_transactions.c.estimated_cost, request_reservations.c.amount
+                ).label("committed_usd"),
+                usage_transactions.c.occurred_at.label("settled_at"),
+            )
             .join(requests, requests.c.id == request_capacity.c.request_id)
             .outerjoin(
                 request_reservations,
                 request_reservations.c.request_id == request_capacity.c.request_id,
             )
+            .outerjoin(
+                usage_transactions,
+                usage_transactions.c.reconciliation_id
+                == "request:" + request_capacity.c.request_id,
+            )
             .where(requests.c.provider_id == invocation.provider)
         )
     ).all()
-    has_fresh_capacity = False
-    for row in rows:
-        if row.resets_at and row.unit != "USD" and datetime.fromisoformat(row.resets_at) <= now:
+    has_capacity = False
+    for row in rows.values():
+        expired = (
+            row.resets_at is not None
+            and row.unit != "USD"
+            and datetime.fromisoformat(row.resets_at) <= now
+        )
+        if expired and config.quota_policy is QuotaPolicy.LOCAL_LIMITS_ONLY:
             continue
-        if row.remaining <= 0:
+        remaining = (
+            row.remaining if not expired and row.status in ("verified", "observed") else None
+        )
+        if remaining is not None and remaining <= 0:
             raise GatewayError("provider_capacity_exhausted", 429)
         fresh = (
-            latest_ids[row.resource] == row.id
+            remaining is not None
+            and latest_rows[row.resource].id == row.id
             and row.fresh_until is not None
             and datetime.fromisoformat(row.observed_at)
             <= now
@@ -80,7 +107,14 @@ async def check_quota(
             item
             for item in commitments
             if item.request_id != exclude
-            and (datetime.fromisoformat(item.created_at) >= observed or item.request_id in active)
+            and (
+                datetime.fromisoformat(item.created_at) >= observed
+                or item.request_id in active
+                or (
+                    item.settled_at is not None
+                    and datetime.fromisoformat(item.settled_at) >= observed
+                )
+            )
         ]
         need: Decimal | None = None
         match row.unit:
@@ -97,9 +131,9 @@ async def check_quota(
                     with localcontext(prec=2048):
                         need = amount + sum(
                             (
-                                item.reserved_usd
+                                item.committed_usd
                                 for item in relevant
-                                if item.reserved_usd is not None
+                                if item.committed_usd is not None
                             ),
                             Decimal(0),
                         )
@@ -108,8 +142,10 @@ async def check_quota(
             case _:
                 continue
         if need is not None:
-            if need > row.remaining:
+            if remaining is not None and need > remaining:
                 raise GatewayError("provider_capacity_insufficient", 429)
-            has_fresh_capacity = has_fresh_capacity or fresh
-    if config.quota_policy is QuotaPolicy.REQUIRE_FRESH and not has_fresh_capacity:
+            if config.quota_policy is QuotaPolicy.REQUIRE_FRESH and not fresh:
+                raise GatewayError("provider_capacity_unknown")
+            has_capacity = True
+    if config.quota_policy is QuotaPolicy.REQUIRE_FRESH and not has_capacity:
         raise GatewayError("provider_capacity_unknown")
