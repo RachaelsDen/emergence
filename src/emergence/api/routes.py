@@ -243,16 +243,6 @@ def install_routes(app: FastAPI, settings: Settings, services: Callable[[], Serv
             raise HTTPException(404, "provider_not_found")
         return Budgets(budgets=tuple([await gateway.ledger.balance(name) for name in names]))
 
-    @router.post("/budgets/adjustments")
-    async def adjust(
-        body: Adjustment, identity: Annotated[Identity, Depends(auth.operator)]
-    ) -> BudgetBalance:
-        if (config := settings.providers.get(body.provider)) is None or not config.enabled:
-            raise HTTPException(404, "provider_not_found")
-        return await services().gateway.ledger.adjust(
-            body.provider, body.amount, body.kind, body.reason, identity.actor
-        )
-
     @router.get("/usage")
     async def usage(
         _identity: Annotated[Identity, Depends(auth.operator)],

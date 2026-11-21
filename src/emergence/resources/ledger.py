@@ -1,11 +1,10 @@
 """Atomic request financial lifecycle. Callers own admission and settlement writes."""
 
 import json
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, localcontext
+from hashlib import sha256
 from typing import Literal
-from uuid import uuid4
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,108 +15,19 @@ from emergence.storage.database import Database
 from emergence.storage.models import (
     audit_events,
     budget_adjustments,
-    providers,
+    budget_periods,
     request_reservations,
-    requests,
     reservation_events,
     usage_transactions,
 )
 from emergence.telemetry.logging import Redactor
 
+from .audit import record_audit
+from .budgets import AdjustmentReceipt, projection
 from .budgets import BudgetBalance as BudgetBalance
-from .budgets import projection
 from .pricing import BudgetError as BudgetError
 from .pricing import check_money, effective, install_prices, rates, stamp, version_key
-
-
-@dataclass(frozen=True, slots=True)
-class _Account:
-    request: str
-    provider: str
-    model: str
-    kind: ProviderKind
-    period: str | None
-    price: str | None
-    event: str | None
-    sequence: int
-
-    @classmethod
-    async def load(cls, session: AsyncSession, request_id: str) -> "_Account":
-        r, h, e = requests.c, request_reservations.c, reservation_events.c
-        row = (
-            await session.execute(
-                select(
-                    r.provider_id,
-                    r.model_id,
-                    providers.c.kind,
-                    h.budget_period_id,
-                    h.price_version_id,
-                    e.kind.label("event"),
-                    e.sequence,
-                )
-                .select_from(requests)
-                .join(providers, providers.c.id == r.provider_id)
-                .outerjoin(request_reservations, h.request_id == r.id)
-                .outerjoin(reservation_events, e.request_id == r.id)
-                .where(r.id == request_id)
-                .order_by(e.sequence.desc())
-                .limit(1)
-            )
-        ).one_or_none()
-        if row is None:
-            raise BudgetError("unknown_request")
-        if row.kind != ProviderKind.LLAMACPP and row.event is None:
-            raise BudgetError("reservation_missing")
-        return cls(
-            request_id,
-            row.provider_id,
-            row.model_id,
-            ProviderKind(row.kind),
-            row.budget_period_id,
-            row.price_version_id,
-            row.event,
-            (row.sequence or 0) + 1,
-        )
-
-    async def append(
-        self, session: AsyncSession, kind: str, now: datetime, tx: str | None = None
-    ) -> None:
-        await session.execute(
-            reservation_events.insert().values(
-                request_id=self.request,
-                sequence=self.sequence,
-                kind=kind,
-                settled_request_id=self.request if tx else None,
-                usage_transaction_id=tx,
-                occurred_at=stamp(now),
-            )
-        )
-
-    async def charge(
-        self, session: AsyncSession, amount: Decimal | None, usage: TokenUsage, at: datetime
-    ) -> None:
-        uid = uuid4().hex
-        await session.execute(
-            usage_transactions.insert().values(
-                id=uid,
-                reconciliation_id=f"request:{self.request}",
-                request_id=self.request,
-                provider_id=self.provider,
-                model_id=self.model,
-                budget_period_id=self.period,
-                currency="USD",
-                estimated_cost=amount,
-                virtual_charge=amount
-                if self.kind in (ProviderKind.ZAI, ProviderKind.MINIMAX)
-                else None,
-                occurred_at=stamp(at),
-                input_tokens=usage.input_tokens,
-                cached_input_tokens=usage.cached_input_tokens,
-                output_tokens=usage.output_tokens,
-            )
-        )
-        if self.period is not None:
-            await self.append(session, "settled", at, uid)
+from .request_account import RequestAccount
 
 
 class BudgetLedger:
@@ -168,8 +78,9 @@ class BudgetLedger:
         if amount > balance.available:
             if self.settings.enforce_budgets:
                 raise BudgetError("budget_insufficient")
-            await self._audit(
+            await record_audit(
                 session,
+                self._redactor,
                 request.provider,
                 request_id,
                 now,
@@ -202,7 +113,7 @@ class BudgetLedger:
     async def settle(
         self, session: AsyncSession, request_id: str, usage: TokenUsage, now: datetime
     ) -> bool:
-        account = await _Account.load(session, request_id)
+        account = await RequestAccount.load(session, request_id)
         if account.event == "settled":
             return True
         if account.event == "released":
@@ -228,31 +139,6 @@ class BudgetLedger:
         await account.charge(session, amount, usage, now)
         return True
 
-    async def _audit(
-        self,
-        session: AsyncSession,
-        provider: str,
-        request: str | None,
-        now: datetime,
-        actor: str,
-        action: str,
-        reason: str,
-    ) -> int:
-        if not actor.strip() or not reason.strip():
-            raise BudgetError("audit_detail_required")
-        result = await session.execute(
-            audit_events.insert()
-            .values(
-                provider_id=provider,
-                request_id=request,
-                occurred_at=stamp(now),
-                actor_id=self._redactor.text(actor.strip()),
-                action=json.dumps([action, self._redactor.text(reason.strip())]),
-            )
-            .returning(audit_events.c.id)
-        )
-        return result.scalar_one()
-
     async def release(
         self,
         session: AsyncSession,
@@ -261,12 +147,14 @@ class BudgetLedger:
         reason: str,
         actor: str = "system",
     ) -> None:
-        account = await _Account.load(session, request_id)
+        account = await RequestAccount.load(session, request_id)
         if account.event == "released":
             return
         if account.event == "settled":
             raise BudgetError("reservation_settled")
-        await self._audit(session, account.provider, request_id, now, actor, "no_charge", reason)
+        await record_audit(
+            session, self._redactor, account.provider, request_id, now, actor, "no_charge", reason
+        )
         if account.period is not None:
             await account.append(session, "released", now)
 
@@ -283,11 +171,18 @@ class BudgetLedger:
             await self.release(session, request_id, now, reason, actor)
             return
         check_money(amount)
-        account = await _Account.load(session, request_id)
+        account = await RequestAccount.load(session, request_id)
         if amount < 0 or account.period is None or account.event in {"settled", "released"}:
             raise BudgetError("invalid_resolution")
-        await self._audit(
-            session, account.provider, request_id, now, actor, "operator_estimate", reason
+        await record_audit(
+            session,
+            self._redactor,
+            account.provider,
+            request_id,
+            now,
+            actor,
+            "operator_estimate",
+            reason,
         )
         await account.charge(session, amount, TokenUsage(), now)
 
@@ -303,7 +198,9 @@ class BudgetLedger:
         reason: str,
         actor: str,
         at: datetime | None = None,
-    ) -> BudgetBalance:
+        *,
+        idempotency_key: str,
+    ) -> AdjustmentReceipt:
         check_money(amount)
         if (
             not amount
@@ -311,15 +208,46 @@ class BudgetLedger:
             or (kind == "grant" and amount < 0 or kind == "reduction" and amount > 0)
         ):
             raise BudgetError("invalid_adjustment")
+        if not 1 <= len(idempotency_key) <= 128 or any(
+            not "!" <= char <= "~" for char in idempotency_key
+        ):
+            raise BudgetError("invalid_idempotency_key")
+        identity = sha256(json.dumps([actor.strip(), idempotency_key]).encode()).hexdigest()
+        fingerprint = sha256(
+            json.dumps([provider, amount.as_integer_ratio(), kind, reason.strip()]).encode()
+        ).hexdigest()
+        action = f"{kind}:{fingerprint}"
         now = at or datetime.now(UTC)
         async with self.database.write() as session:
+            existing = (
+                await session.execute(
+                    select(budget_adjustments, audit_events.c.action, budget_periods.c.timezone)
+                    .join(audit_events, audit_events.c.id == budget_adjustments.c.audit_event_id)
+                    .join(
+                        budget_periods, budget_periods.c.id == budget_adjustments.c.budget_period_id
+                    )
+                    .where(budget_adjustments.c.id == identity)
+                )
+            ).one_or_none()
+            if existing is not None:
+                if existing.action != json.dumps([action, existing.reason]):
+                    raise BudgetError("adjustment_idempotency_conflict")
+                bound = self.settings.model_copy(update={"accounting_timezone": existing.timezone})
+                balance = await projection(
+                    session, bound, provider, datetime.fromisoformat(existing.occurred_at)
+                )
+                return AdjustmentReceipt(
+                    **balance.model_dump(), adjustment_id=identity, replayed=True
+                )
             balance = await projection(session, self.settings, provider, now)
             if balance.period_id is None:
                 raise BudgetError("no_dollar_budget")
-            aid = await self._audit(session, provider, None, now, actor, kind, reason)
+            aid = await record_audit(
+                session, self._redactor, provider, None, now, actor, action, reason
+            )
             await session.execute(
                 budget_adjustments.insert().values(
-                    id=uuid4().hex,
+                    id=identity,
                     budget_period_id=balance.period_id,
                     amount_delta=amount,
                     kind=kind,
@@ -328,4 +256,5 @@ class BudgetLedger:
                     occurred_at=stamp(now),
                 )
             )
-            return await projection(session, self.settings, provider, now)
+            balance = await projection(session, self.settings, provider, now)
+            return AdjustmentReceipt(**balance.model_dump(), adjustment_id=identity, replayed=False)

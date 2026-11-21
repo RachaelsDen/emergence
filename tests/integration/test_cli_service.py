@@ -8,13 +8,11 @@ import sys
 from collections.abc import Generator, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Event, Thread
 from time import monotonic
 from typing import Final
-from uuid import UUID
 
 import httpx
 import pytest
@@ -58,7 +56,7 @@ def upstream() -> Iterator[str]:
 
 
 @dataclass(frozen=True, slots=True)
-class _Service:
+class Service:
     config: Path
     url: str
     env: dict[str, str]
@@ -90,7 +88,7 @@ def _port() -> int:
 
 
 @contextmanager
-def _start(service: _Service, *, legacy: bool = False) -> Generator[None]:
+def _start(service: Service, *, legacy: bool = False) -> Generator[None]:
     launch = [] if legacy else ["serve"]
     with (
         subprocess.Popen(
@@ -133,7 +131,7 @@ def _start(service: _Service, *, legacy: bool = False) -> Generator[None]:
 
 
 @pytest.fixture(scope="module")
-def launch_config(tmp_path_factory: pytest.TempPathFactory, upstream: str) -> _Service:
+def launch_config(tmp_path_factory: pytest.TempPathFactory, upstream: str) -> Service:
     directory = tmp_path_factory.mktemp("e006-cli")
     private = directory / "private"
     private.mkdir(mode=0o700)
@@ -198,16 +196,16 @@ def launch_config(tmp_path_factory: pytest.TempPathFactory, upstream: str) -> _S
         check=True,
         timeout=15,
     )
-    return _Service(path, f"http://127.0.0.1:{port}", env)
+    return Service(path, f"http://127.0.0.1:{port}", env)
 
 
 @pytest.fixture(scope="module")
-def service(launch_config: _Service) -> Iterator[_Service]:
+def service(launch_config: Service) -> Iterator[Service]:
     with _start(launch_config):
         yield launch_config
 
 
-def _success(result: subprocess.CompletedProcess[str]) -> dict[str, JsonValue]:
+def success(result: subprocess.CompletedProcess[str]) -> dict[str, JsonValue]:
     assert result.returncode == 0, result.stderr
     assert result.stderr == ""
     return JSON_OBJECT.validate_json(result.stdout)
@@ -223,7 +221,7 @@ def _error(result: subprocess.CompletedProcess[str], status: int) -> dict[str, J
     return body
 
 
-def test_public_health_and_legacy_startup(launch_config: _Service) -> None:
+def test_public_health_and_legacy_startup(launch_config: Service) -> None:
     # Keep this listener independent from the module-scoped explicitly launched service.
     port = _port()
     path = launch_config.config.with_name("legacy.yaml")
@@ -240,9 +238,9 @@ def test_public_health_and_legacy_startup(launch_config: _Service) -> None:
         check=True,
         timeout=15,
     )
-    legacy = _Service(path, f"http://127.0.0.1:{port}", env)
+    legacy = Service(path, f"http://127.0.0.1:{port}", env)
     with _start(legacy, legacy=True):
-        assert _success(legacy.run("health"))["status"] == "ready"
+        assert success(legacy.run("health"))["status"] == "ready"
         live = subprocess.run(
             [CLI, "health", "--live"],
             cwd=PROJECT,
@@ -252,11 +250,11 @@ def test_public_health_and_legacy_startup(launch_config: _Service) -> None:
             check=False,
             timeout=15,
         )
-        assert _success(live)["status"] == "alive"
+        assert success(live)["status"] == "alive"
 
 
-def test_missing_token_cannot_read_providers(service: _Service) -> None:
-    anonymous = _Service(service.config, service.url, _clean_env())
+def test_missing_token_cannot_read_providers(service: Service) -> None:
+    anonymous = Service(service.config, service.url, _clean_env())
     _error(anonymous.run("providers"), 401)
 
 
@@ -270,12 +268,12 @@ def test_missing_token_cannot_read_providers(service: _Service) -> None:
     ],
 )
 def test_reader_can_inspect_metadata(
-    service: _Service, command: tuple[str, ...], field: str
+    service: Service, command: tuple[str, ...], field: str
 ) -> None:
-    assert isinstance(_success(service.run(*command, token_env="CLI_FIXTURE_READER"))[field], list)
+    assert isinstance(success(service.run(*command, token_env="CLI_FIXTURE_READER"))[field], list)
 
 
-def test_invalid_and_reader_tokens_cannot_infer_or_adjust(service: _Service) -> None:
+def test_invalid_and_reader_tokens_cannot_infer_or_adjust(service: Service) -> None:
     args = ("inference", "test", "--provider", "offline", "--model", "alias")
     _error(service.run(*args, token_env="CLI_FIXTURE_INVALID", stdin="offline"), 401)
     _error(service.run(*args, token_env="CLI_FIXTURE_READER", stdin="offline"), 403)
@@ -298,28 +296,8 @@ def test_invalid_and_reader_tokens_cannot_infer_or_adjust(service: _Service) -> 
     _error(service.run("usage", token_env="CLI_FIXTURE_READER"), 403)
 
 
-def test_operator_adjusts_exact_decimal_budget(service: _Service) -> None:
-    adjusted = _success(
-        service.run(
-            "budgets",
-            "adjust",
-            "--provider",
-            "offline",
-            "--amount",
-            "0.123456789012",
-            "--kind",
-            "grant",
-            "--reason",
-            "offline CLI grant",
-        )
-    )
-    assert adjusted["provider"] == "offline"
-    assert isinstance(amount := adjusted["adjustments"], str)
-    assert Decimal(amount) == Decimal("0.123456789012")
-
-
 def test_operator_replays_inference_and_audits_no_charge_resolution(
-    service: _Service, tmp_path: Path
+    service: Service, tmp_path: Path
 ) -> None:
     prompt = tmp_path / "prompt.txt"
     prompt.write_text("offline", encoding="utf-8")
@@ -350,8 +328,8 @@ def test_operator_replays_inference_and_audits_no_charge_resolution(
     assert _error(service.run(*args, stdin="not the same input"), 409)["error"] == (
         "idempotency_conflict"
     )
-    assert _success(service.run("inference", "status", request_id))["state"] == "ambiguous"
-    resolution = _success(
+    assert success(service.run("inference", "status", request_id))["state"] == "ambiguous"
+    resolution = success(
         service.run(
             "inference",
             "resolve",
@@ -364,8 +342,8 @@ def test_operator_replays_inference_and_audits_no_charge_resolution(
     assert resolution["state"] == "resolved"
 
 
-def test_usage_passes_pagination_and_filters_to_service(service: _Service) -> None:
-    page = _success(
+def test_usage_passes_pagination_and_filters_to_service(service: Service) -> None:
+    page = success(
         service.run(
             "usage",
             "--provider",
@@ -383,33 +361,3 @@ def test_usage_passes_pagination_and_filters_to_service(service: _Service) -> No
         )
     )
     assert (page["items"], page["limit"], page["offset"], page["has_more"]) == ([], 2, 3, False)
-
-
-def test_missing_reply_exposes_retry_key_without_echoing_credentials(
-    launch_config: _Service,
-) -> None:
-    with socket.socket() as closed:
-        # Hold an unused local port without listening, so no request can leave this machine.
-        closed.bind(("127.0.0.1", 0))
-        url = f"http://127.0.0.1:{closed.getsockname()[1]}"
-        args = (
-            "--url",
-            url,
-            "inference",
-            "test",
-            "--provider",
-            "offline",
-            "--model",
-            "alias",
-        )
-        missing = launch_config.run(*args, stdin="offline")
-        redacted = launch_config.run(*args, "--request-id", OPERATOR, stdin="offline")
-
-    for result in (missing, redacted):
-        assert result.returncode == 3, (result.stdout, result.stderr)
-        assert result.stdout == ""
-        assert OPERATOR not in result.stderr
-        assert JSON_OBJECT.validate_json(result.stderr)["outcome_uncertain"] is True
-    key = JSON_OBJECT.validate_json(missing.stderr)["idempotency_key"]
-    assert isinstance(key, str) and UUID(key).version == 4
-    assert JSON_OBJECT.validate_json(redacted.stderr)["idempotency_key"] == "[REDACTED]"

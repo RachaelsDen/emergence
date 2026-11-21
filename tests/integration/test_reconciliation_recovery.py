@@ -96,9 +96,17 @@ async def test_audited_reductions_and_resolution_preserve_negative_balances(
             await admit(session, ledger, "uncharged", 1)
         for reason, actor in (("", "operator"), ("checked", "  ")):
             with pytest.raises(BudgetError, match="audit_detail_required"):
-                await ledger.adjust("p", Decimal(1), "grant", reason, actor, NOW)
+                await ledger.adjust(
+                    "p", Decimal(1), "grant", reason, actor, NOW, idempotency_key="invalid-audit"
+                )
         balance = await ledger.adjust(
-            "p", Decimal(-100), "reduction", "password=private", "Bearer private", NOW
+            "p",
+            Decimal(-100),
+            "reduction",
+            "password=private",
+            "Bearer private",
+            NOW,
+            idempotency_key="reduce",
         )
         assert (balance.available, balance.adjustments, balance.reserved) == (-5, -100, 5)
         with pytest.raises(BudgetError, match="budget_insufficient"):
@@ -110,7 +118,13 @@ async def test_audited_reductions_and_resolution_preserve_negative_balances(
                 session, "uncharged", None, NOW, "provider voided invoice", "operator"
             )
         balance = await ledger.adjust(
-            "p", Decimal("2.01"), "correction", "entry #1", "operator", NOW
+            "p",
+            Decimal("2.01"),
+            "correction",
+            "entry #1",
+            "operator",
+            NOW,
+            idempotency_key="correct",
         )
         assert (balance.spent, balance.available, balance.reserved, balance.measured_total) == (
             Decimal("7.25"),

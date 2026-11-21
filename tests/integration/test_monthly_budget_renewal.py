@@ -158,6 +158,7 @@ async def test_real_capacity_still_blocks_after_virtual_month_renewal(
             "exhaust test virtual period",
             "operator",
             at=clock(),
+            idempotency_key="exhaust-test-period",
         )
         assert (await ledger.balance("p", clock())).available == 0
         if block != "safety":

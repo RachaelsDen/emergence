@@ -44,6 +44,11 @@ class BudgetBalance(SafeModel):
     safety_limit_confirmed: bool | None = None
 
 
+class AdjustmentReceipt(BudgetBalance):
+    adjustment_id: str
+    replayed: bool
+
+
 def month(at: datetime, zone: str) -> tuple[datetime, datetime]:
     if at.utcoffset() is None:
         raise BudgetError("timezone_required")

@@ -8,7 +8,7 @@ from typing import Final
 import httpx
 import pytest
 from _gateway_fixture import answer, invocation, settings_for
-from fastapi.openapi.models import OpenAPI, Reference, Response, Schema
+from fastapi.openapi.models import OpenAPI, PathItem, Reference, Response, Schema
 from httpx import AsyncClient
 from pydantic import JsonValue, TypeAdapter
 from test_migrations import migrated_path as migrated_path
@@ -167,13 +167,14 @@ async def test_numeric_money_and_secret_validation_inputs_are_not_accepted_or_ec
     response = await client.post(
         "/api/v1/budgets/adjustments",
         json={"provider": "p", "amount": 0.1, "kind": "grant", "reason": OPERATOR},
+        headers={"Idempotency-Key": "invalid-numeric-money"},
     )
     assert response.status_code == 422
     assert response.content == b'{"error":"invalid_request"}'
     assert OPERATOR not in response.text
     document = OpenAPI.model_validate_json((await client.get("/openapi.json")).content)
     assert document.paths is not None and document.components is not None
-    operation = document.paths["/api/v1/budgets/adjustments"].post
+    operation = PathItem.model_validate(document.paths["/api/v1/budgets/adjustments"]).post
     assert operation is not None and operation.responses is not None
     documented = operation.responses["422"]
     assert isinstance(documented, Response) and documented.content is not None
@@ -227,6 +228,7 @@ async def test_disabled_provider_budget_operations_are_rejected(
         await client.post(
             "/api/v1/budgets/adjustments",
             json={"provider": "p", "amount": "1", "kind": "grant", "reason": "disabled test"},
+            headers={"Idempotency-Key": "disabled-provider"},
         )
         if adjustment
         else await client.get("/api/v1/budgets", params={"provider": "p"})

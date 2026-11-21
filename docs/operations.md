@@ -141,6 +141,12 @@ virtual accounting, not provider credits. Avoid multiple configured names
 for one intended OpenAI account scope: exposure is provider-name keyed.
 The opening is fixed at USD 100; the compatibility `monthly_budget` setting
 accepts only `100`. Change spendable virtual funds through audited adjustments.
+Every adjustment requires a stable operation key (`Idempotency-Key` over HTTP,
+`--adjustment-id` in the CLI). Save the generated or supplied key from CLI
+output and reuse it with identical inputs when a reply is lost. Replays retain
+the original period and cannot grant funds again after renewal. Conflicting
+inputs return 409. These identifiers grant no authority without operator
+authentication and are not bearer credentials.
 
 Keep measured scoped provider report aggregates, local estimates and virtual
 charges separate. Aggregate reports are not measured costs for individual

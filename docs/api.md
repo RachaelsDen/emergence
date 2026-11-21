@@ -106,11 +106,27 @@ reduction, or signed nonzero correction with an evidence-based reason:
 
 ```sh
 emergence --token-env EMERGENCE_OPERATOR_TOKEN budgets adjust --provider openai \
-  --kind grant --amount 1.25 --reason 'Approved virtual budget adjustment'
+  --kind grant --amount 1.25 --reason 'Approved virtual budget adjustment' \
+  --adjustment-id virtual-grant-001
 ```
 
 Equivalent `POST /api/v1/budgets/adjustments` body:
 `{"provider":"openai","kind":"grant","amount":"1.25","reason":"Approved virtual budget adjustment"}`.
+The HTTP request requires `Idempotency-Key` containing 1-128 visible ASCII
+characters. The CLI generates a key when `--adjustment-id` is omitted and
+includes it as `idempotency_key` in success or uncertain-outcome output.
+Save that key; the CLI never retries automatically.
+
+Reuse the same key and identical provider, exact decimal value, kind and
+trimmed reason after a lost reply. The immutable adjustment and audit are
+applied once, including concurrent delivery and retries after restart.
+The receipt retains the normal flat budget fields and adds `adjustment_id`
+and `replayed`. A replay projects the original calendar period, using its
+stored timezone; it never grants the amount again in a new month.
+Changing any operation input under the same actor/key returns
+`409 adjustment_idempotency_conflict`, even when redaction makes reasons
+look identical. The key is scoped to the authenticated role, and only its
+digest is stored. Use a new key only for a deliberately separate adjustment.
 
 Investigate an unresolved charge before resolving it. A supplied nonnegative
 `--amount` is an operator **estimate**, not a measured provider charge.
