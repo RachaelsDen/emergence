@@ -7,9 +7,12 @@ from typing import Literal
 import httpx
 import pytest
 from _gateway_fixture import NOW, gateway_for, invocation, settings_for
+from pydantic import JsonValue
 from sqlalchemy import select
 from test_migrations import migrated_path as migrated_path
 
+from emergence.api.app import create_app
+from emergence.inference.errors import GatewayError
 from emergence.inference.gateway import ArchivedOutcome, RequestState
 from emergence.storage.archive import RecordKey
 from emergence.storage.models import archive_references
@@ -18,14 +21,37 @@ from emergence.storage.repositories import ArchiveReference
 
 @pytest.mark.anyio
 @pytest.mark.parametrize(
-    ("defect", "response_model"),
+    ("defect", "response_model", "wire_usage"),
     [
-        ("usage", "configured-model"),
-        ("compressed-body", "configured-model"),
-        ("model", "other-model"),
-        ("model", "m"),
-        ("model", "Configured-model"),
-        ("model", "configured-model "),
+        ("usage", "configured-model", {"prompt_tokens": False, "completion_tokens": False}),
+        ("compressed-body", "configured-model", {"prompt_tokens": 5, "completion_tokens": 3}),
+        ("model", "other-model", {"prompt_tokens": 5, "completion_tokens": 3}),
+        ("model", "m", {"prompt_tokens": 5, "completion_tokens": 3}),
+        ("model", "Configured-model", {"prompt_tokens": 5, "completion_tokens": 3}),
+        ("model", "configured-model ", {"prompt_tokens": 5, "completion_tokens": 3}),
+        ("usage", "configured-model", {"prompt_tokens": 2**63, "completion_tokens": 3}),
+        ("usage", "configured-model", {"prompt_tokens": 5, "completion_tokens": 2**63}),
+        (
+            "usage",
+            "configured-model",
+            {
+                "completion_tokens": 3,
+                "prompt_tokens_details": {"cached_tokens": 2**63},
+            },
+        ),
+        (
+            "usage",
+            "configured-model",
+            {
+                "prompt_tokens": 5,
+                "completion_tokens_details": {"reasoning_tokens": 2**63},
+            },
+        ),
+        (
+            "usage",
+            "configured-model",
+            {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 2**63},
+        ),
     ],
 )
 async def test_invalid_wire_response_preserves_hold_and_replays_without_dispatch(
@@ -33,16 +59,14 @@ async def test_invalid_wire_response_preserves_hold_and_replays_without_dispatch
     monkeypatch: pytest.MonkeyPatch,
     defect: Literal["usage", "compressed-body", "model"],
     response_model: str,
+    wire_usage: dict[str, JsonValue],
 ) -> None:
     monkeypatch.setenv("TEST_E005_INFERENCE", "synthetic-b1-inference")
     payload = {
         "model": response_model,
         "choices": [{"message": {"content": "synthetic response"}}],
-        "usage": (
-            {"prompt_tokens": False, "completion_tokens": False}
-            if defect == "usage"
-            else {"prompt_tokens": 5, "completion_tokens": 3}
-        ),
+        "usage": wire_usage,
+        "credential_echo": "synthetic-b1-inference",
     }
     calls: list[str] = []
 
@@ -78,7 +102,8 @@ async def test_invalid_wire_response_preserves_hold_and_replays_without_dispatch
         outcome = ArchivedOutcome.model_validate_json(record.split(b"\n", 2)[2])
         assert outcome.failure is not None
         if defect != "compressed-body":
-            assert outcome.failure.raw_response == payload
+            assert outcome.failure.raw_response == {**payload, "credential_echo": "[REDACTED]"}
+            assert b"synthetic-b1-inference" not in record
         balance = await ledger.balance("p", NOW)
         assert (balance.reserved, balance.spent) == (Decimal("0.03"), Decimal("0"))
         immediate = await gateway.infer(invocation(), "malformed-usage")
@@ -91,4 +116,48 @@ async def test_invalid_wire_response_preserves_hold_and_replays_without_dispatch
         assert replay.state is first.state and replay.error_code == first.error_code
         balance = await ledger.balance("p", NOW)
         assert (balance.reserved, balance.spent) == (Decimal("0.03"), Decimal("0"))
+    assert calls == ["/v1/chat/completions"]
+
+    app = create_app(
+        settings.model_copy(
+            update={
+                "database_path": migrated_path,
+                "spool_path": migrated_path.parent / "gateway-spool",
+            }
+        )
+    )
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client,
+    ):
+        assert (await client.get("/health/ready")).json() == {"status": "ready"}
+
+
+@pytest.mark.anyio
+async def test_storage_maximum_still_enforces_billable_bound_policy(
+    migrated_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TEST_E005_INFERENCE", "synthetic-b1-inference")
+    calls: list[str] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return httpx.Response(
+            200,
+            json={
+                "model": "configured-model",
+                "choices": [{"message": {"content": "unreasonable usage"}}],
+                "usage": {
+                    "prompt_tokens": 2**63 - 1,
+                    "completion_tokens": 0,
+                    "prompt_tokens_details": {"cached_tokens": 2**63 - 1},
+                },
+            },
+        )
+
+    async with gateway_for(migrated_path, settings_for(), respond) as (gateway, _, _, _):
+        result = await gateway.infer(invocation(), "storage-maximum")
+        assert result.error_code == "billable_bound_violation"
+        with pytest.raises(GatewayError, match="billable_bound_unverified"):
+            await gateway.infer(invocation(), "another-request")
     assert calls == ["/v1/chat/completions"]

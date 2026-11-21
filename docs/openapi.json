@@ -1290,6 +1290,7 @@
           "cached_input_tokens": {
             "anyOf": [
               {
+                "maximum": 9.223372036854776e+18,
                 "minimum": 0.0,
                 "type": "integer"
               },
@@ -1302,6 +1303,7 @@
           "input_tokens": {
             "anyOf": [
               {
+                "maximum": 9.223372036854776e+18,
                 "minimum": 0.0,
                 "type": "integer"
               },
@@ -1314,6 +1316,7 @@
           "output_tokens": {
             "anyOf": [
               {
+                "maximum": 9.223372036854776e+18,
                 "minimum": 0.0,
                 "type": "integer"
               },
@@ -1326,6 +1329,7 @@
           "reasoning_tokens": {
             "anyOf": [
               {
+                "maximum": 9.223372036854776e+18,
                 "minimum": 0.0,
                 "type": "integer"
               },

@@ -7,7 +7,8 @@ from pydantic_core import PydanticCustomError
 
 from emergence.config import SafeModel
 
-TokenCount = Annotated[int, Field(strict=True, ge=0)]
+# Normalized counts must fit the SQLite INTEGER accounting columns.
+TokenCount = Annotated[int, Field(strict=True, ge=0, le=2**63 - 1)]
 
 
 class Message(SafeModel):
