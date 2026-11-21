@@ -10,6 +10,8 @@ from emergence.providers.base import ChatAdapter
 class OpenAIAdapter(ChatAdapter):
     output_parameter = "max_completion_tokens"
     supports_reasoning_control = True
+    # Omitting reasoning_effort preserves the model default; it does not disable reasoning.
+    default_reasoning_possible = True
 
     def payload(self, request: InferenceRequest, model: ModelConfig) -> dict[str, JsonValue]:
         payload = super().payload(request, model)

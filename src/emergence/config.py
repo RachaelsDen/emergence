@@ -8,6 +8,7 @@ from typing import Annotated, Final, Self
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+import httpx
 import yaml
 from pydantic import (
     AwareDatetime,
@@ -95,9 +96,11 @@ class ProviderConfig(SafeModel):
             if endpoint is None:
                 continue
             try:
+                transport_url = httpx.URL(endpoint)
                 parsed = urlsplit(endpoint)
                 valid = (
-                    parsed.scheme in {"http", "https"}
+                    transport_url.is_absolute_url
+                    and parsed.scheme in {"http", "https"}
                     and bool(parsed.hostname)
                     and parsed.username is None
                     and parsed.password is None
@@ -105,7 +108,7 @@ class ProviderConfig(SafeModel):
                     and not parsed.fragment
                     and (parsed.port is None or 0 < parsed.port <= 65535)
                 )
-            except ValueError:
+            except (httpx.InvalidURL, ValueError):
                 valid = False
             if not valid:
                 raise PydanticCustomError("endpoint", "endpoint must be a credential-free HTTP URL")

@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import pytest
+import yaml
 from pydantic import ValidationError
 
 from emergence.config import (
@@ -129,14 +130,79 @@ def test_invalid_timezone_rejected() -> None:
     [
         "https://user:password@fixture.invalid",
         "https://fixture.invalid?key=secret",
+        "https://fixture.invalid/path#secret",
         "file:///tmp/key",
+        "https://fixture.invalid:secret/path",
+        "https://fixture.invalid:65536/path",
+        "https://fixture.invalid:0/path",
+        "https://fixture.invalid:-1/path",
+        "https://[::1/path",
+        "https://\u2603.invalid/path",
+        "https://fixture.invalid/\ud800",
+        *[f"https://fixture.invalid/v1{char}secret" for char in "\x00\t\n\r\x01\x1f\x7f"],
     ],
 )
-def test_credentials_and_non_http_endpoints_cannot_enter_configuration(endpoint: str) -> None:
-    with pytest.raises(ValidationError):
-        ProviderConfig.model_validate(
-            {"kind": "zai", "base_url": endpoint, "quota_policy": "local_limits_only"}
-        )
+@pytest.mark.parametrize("field", ["base_url", "quota_url", "reporting_base_url"])
+def test_invalid_endpoints_cannot_enter_loaded_configuration(
+    tmp_path: Path, field: str, endpoint: str
+) -> None:
+    config = tmp_path / "endpoints.yaml"
+    config.write_text(
+        yaml.safe_dump(
+            {
+                "providers": {
+                    "p": {
+                        "kind": "openai",
+                        "quota_policy": "local_limits_only",
+                        "base_url": "https://fixture.invalid/v1",
+                        field: endpoint,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError) as captured:
+        load_settings(config)
+
+    assert str(captured.value) == "configuration_invalid"
+    assert captured.value.__cause__ is None
+    assert captured.value.__suppress_context__
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "https://fixture.invalid/v1",
+        "http://127.0.0.1:8080/v1",
+        "http://[::1]:8080/v1",
+        "https://fixture.invalid:65535/path%20segment",
+        "https://b\u00fccher.example/\u00e9tude",
+    ],
+)
+def test_valid_endpoints_survive_configuration_loading(tmp_path: Path, endpoint: str) -> None:
+    config = tmp_path / "endpoints.yaml"
+    config.write_text(
+        yaml.safe_dump(
+            {
+                "providers": {
+                    "p": {
+                        "kind": "openai",
+                        "quota_policy": "local_limits_only",
+                        "base_url": endpoint,
+                        "quota_url": endpoint,
+                        "reporting_base_url": endpoint,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    provider = load_settings(config).providers["p"]
+
+    assert (provider.base_url, provider.quota_url, provider.reporting_base_url) == (endpoint,) * 3
 
 
 @pytest.mark.parametrize("opening", ["0", "99.99", "150"])

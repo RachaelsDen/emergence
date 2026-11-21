@@ -1,46 +1,17 @@
 """Chat-completion transport shared only where the wire protocol is compatible."""
 
-from dataclasses import dataclass
-from typing import Literal, Protocol
-
 import httpx
 from anyio import fail_after
 from pydantic import JsonValue, SecretStr, TypeAdapter, ValidationError
 
-from emergence.config import ModelConfig, ProviderConfig, ProviderKind, SafeModel, Settings
+from emergence.config import ModelConfig, ProviderConfig, ProviderKind, Settings
 from emergence.inference.schemas import InferenceRequest, InferenceResult, TokenUsage
 from emergence.telemetry.logging import Redactor
 
+from .contracts import FeatureBound as FeatureBound
+from .contracts import Provider as Provider
+from .contracts import ProviderFailure as ProviderFailure
 from .wire import Completion
-
-
-class FeatureBound(SafeModel):
-    dimension: Literal["input", "cached_input", "output", "reasoning", "tools", "extras"]
-    unit: str
-    bounded: bool
-    mechanism: str
-    evidence: str | None
-    included_in: str | None = None
-
-
-@dataclass(slots=True)
-class ProviderFailure(Exception):
-    code: str
-    ambiguous: bool = False
-    status_code: int | None = None
-    raw_response: JsonValue = None
-
-    def __str__(self) -> str:
-        return self.code
-
-
-class Provider(Protocol):
-    name: str
-    config: ProviderConfig
-
-    def features(self, model: ModelConfig) -> tuple[FeatureBound, ...]: ...
-    def preflight(self, request: InferenceRequest, *, cost_enforced: bool) -> ModelConfig: ...
-    async def infer(self, request: InferenceRequest) -> InferenceResult: ...
 
 
 class ChatAdapter:
@@ -48,6 +19,7 @@ class ChatAdapter:
 
     output_parameter: str = "max_tokens"
     mandatory_reasoning: bool = False
+    default_reasoning_possible: bool = False
     supports_reasoning_control: bool = False
 
     def __init__(
@@ -127,7 +99,7 @@ class ChatAdapter:
             raise ProviderFailure("input_limit_exceeded")
         if cost_enforced:
             required = {"input", "output"}
-            if request.reasoning or self.mandatory_reasoning:
+            if request.reasoning or self.mandatory_reasoning or self.default_reasoning_possible:
                 required.add("reasoning")
             if any(
                 not feature.bounded
