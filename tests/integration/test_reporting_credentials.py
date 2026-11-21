@@ -96,3 +96,69 @@ async def test_reporting_rejects_role_values_but_allows_distinct_credentials(
         assert len(dispatched) == expected_count
         assert all(item.issue is None for item in observations)
         assert all(item.status != "unavailable" for item in persisted)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("kind", [ProviderKind.ZAI, ProviderKind.MINIMAX])
+@pytest.mark.parametrize("reporting_env", ["TEST_SUBSCRIPTION_REPORTING", None])
+@pytest.mark.parametrize("admin_enabled", [True, False])
+@pytest.mark.parametrize("collision", [True, False])
+async def test_subscription_reporting_never_dispatches_openai_admin_values(
+    migrated_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    kind: ProviderKind,
+    reporting_env: str | None,
+    admin_enabled: bool,
+    collision: bool,
+) -> None:
+    admin_secret = "synthetic-protected-openai-admin-value"
+    reporting_secret = admin_secret if collision else "synthetic-distinct-subscription-value"
+    settings = Settings(
+        providers={
+            "other_admin": config(ProviderKind.OPENAI, project="proj_other"),
+            "protected_admin": config(
+                ProviderKind.OPENAI,
+                enabled=admin_enabled,
+                reporting_credential_env="TEST_PROTECTED_ADMIN",
+                credential_env="TEST_PROTECTED_INFERENCE",
+            ),
+            "subscription": config(kind, reporting_credential_env=reporting_env),
+        }
+    )
+    monkeypatch.setenv("TEST_PROTECTED_ADMIN", admin_secret)
+    monkeypatch.setenv("TEST_PROTECTED_INFERENCE", "synthetic-distinct-openai-inference")
+    monkeypatch.setenv(reporting_env or "TEST_E004_INFERENCE", reporting_secret)
+    dispatched: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        dispatched.append(request)
+        assert request.headers["Authorization"] == f"Bearer {reporting_secret}"
+        return httpx.Response(
+            200, json={"data": {"limits": [{"type": "TOKENS_LIMIT", "percentage": 37}]}}
+        )
+
+    async with monitor_for(migrated_path, settings, handler) as (monitor, _):
+        observations = await monitor.poll_once("subscription")
+        persisted = await monitor.latest()
+
+    assert len(observations) == len(persisted) == 1
+    if collision:
+        assert dispatched == []
+        for observation in (*observations, *persisted):
+            assert observation.status == "unavailable"
+            assert observation.issue is ReportingIssue.SHARED_CREDENTIAL
+            assert observation.raw_payload_ref is None
+            assert observation.used is observation.limit is observation.remaining is None
+            assert observation.usage_percent is None
+            assert observation.usage == observation.costs == ()
+        archived = b"".join(
+            path.read_bytes() for path in (migrated_path.parent / "report-spool").iterdir()
+        )
+        exposed = caplog.text + "".join(item.model_dump_json() for item in persisted)
+        assert admin_secret not in exposed
+        assert admin_secret.encode() not in archived
+    else:
+        assert len(dispatched) == 1
+        assert all(item.issue is None for item in (*observations, *persisted))
+        assert all(item.status == "experimental" for item in (*observations, *persisted))

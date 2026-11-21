@@ -26,4 +26,10 @@ def reporting_credential(settings: Settings, config: ProviderConfig, now: dateti
         for provider in settings.providers.values()
     ):
         raise ReportingError(ReportingIssue.SHARED_CREDENTIAL)
+    if config.kind is not ProviderKind.OPENAI and any(
+        secret == settings.secret(provider.reporting_credential_env)
+        for provider in settings.providers.values()
+        if provider.kind is ProviderKind.OPENAI
+    ):
+        raise ReportingError(ReportingIssue.SHARED_CREDENTIAL)
     return secret.get_secret_value()
