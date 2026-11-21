@@ -2,6 +2,7 @@
 
 from decimal import Decimal
 from pathlib import Path
+from typing import Literal
 
 import httpx
 import pytest
@@ -16,21 +17,38 @@ from emergence.storage.repositories import ArchiveReference
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("malformed_usage", [True, False], ids=["usage", "compressed-body"])
+@pytest.mark.parametrize(
+    ("defect", "response_model"),
+    [
+        ("usage", "configured-model"),
+        ("compressed-body", "configured-model"),
+        ("model", "other-model"),
+        ("model", "m"),
+        ("model", "Configured-model"),
+        ("model", "configured-model "),
+    ],
+)
 async def test_invalid_wire_response_preserves_hold_and_replays_without_dispatch(
-    migrated_path: Path, monkeypatch: pytest.MonkeyPatch, malformed_usage: bool
+    migrated_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    defect: Literal["usage", "compressed-body", "model"],
+    response_model: str,
 ) -> None:
     monkeypatch.setenv("TEST_E005_INFERENCE", "synthetic-b1-inference")
     payload = {
-        "model": "configured-model",
+        "model": response_model,
         "choices": [{"message": {"content": "synthetic response"}}],
-        "usage": {"prompt_tokens": False, "completion_tokens": False},
+        "usage": (
+            {"prompt_tokens": False, "completion_tokens": False}
+            if defect == "usage"
+            else {"prompt_tokens": 5, "completion_tokens": 3}
+        ),
     }
     calls: list[str] = []
 
     def respond(request: httpx.Request) -> httpx.Response:
         calls.append(request.url.path)
-        if malformed_usage:
+        if defect != "compressed-body":
             return httpx.Response(200, json=payload)
         return httpx.Response(
             200, headers={"Content-Encoding": "gzip"}, stream=httpx.ByteStream(b"invalid gzip")
@@ -40,8 +58,13 @@ async def test_invalid_wire_response_preserves_hold_and_replays_without_dispatch
     async with gateway_for(migrated_path, settings, respond) as (gateway, ledger, database, spool):
         first = await gateway.infer(invocation(), "malformed-usage")
         assert first.state is RequestState.AMBIGUOUS
-        assert first.error_code == (
-            "provider_schema_error" if malformed_usage else "provider_transport_error"
+        assert (
+            first.error_code
+            == {
+                "usage": "provider_schema_error",
+                "compressed-body": "provider_transport_error",
+                "model": "provider_model_mismatch",
+            }[defect]
         )
         assert first.result is None
         record_id = RecordKey(first.request_id, "output").record_id
@@ -54,7 +77,7 @@ async def test_invalid_wire_response_preserves_hold_and_replays_without_dispatch
         record = await spool.read(ArchiveReference(record_id, row.checksum, row.size_bytes))
         outcome = ArchivedOutcome.model_validate_json(record.split(b"\n", 2)[2])
         assert outcome.failure is not None
-        if malformed_usage:
+        if defect != "compressed-body":
             assert outcome.failure.raw_response == payload
         balance = await ledger.balance("p", NOW)
         assert (balance.reserved, balance.spent) == (Decimal("0.03"), Decimal("0"))

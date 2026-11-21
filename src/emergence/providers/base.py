@@ -150,8 +150,12 @@ class ChatAdapter:
         return payload
 
     def _inference_credential(self) -> SecretStr | None:
-        """Keep API role and OpenAI Admin credentials out of inference headers."""
+        """Resolve a header-safe credential isolated from API and reporting roles."""
         credential = self._settings.secret(self.config.credential_env)
+        if credential is not None and any(
+            not "!" <= char <= "~" for char in credential.get_secret_value()
+        ):
+            raise ProviderFailure("invalid_inference_credential")
         protected = (
             self._settings.operator_token_env,
             self._settings.reader_token_env,
@@ -247,6 +251,8 @@ class ChatAdapter:
             raise ProviderFailure(
                 "provider_schema_error", ambiguous=True, raw_response=raw
             ) from None
+        if completion.model != model.id:
+            raise ProviderFailure("provider_model_mismatch", ambiguous=True, raw_response=raw)
         choice = completion.choices[0]
         if choice.message.tool_calls:
             raise ProviderFailure("unexpected_tool_response", ambiguous=True, raw_response=raw)
