@@ -27,8 +27,16 @@ def metrics_enabled() -> bool:
 
 
 @pytest.fixture
+def provider_enabled() -> bool:
+    return True
+
+
+@pytest.fixture
 async def api(
-    migrated_path: Path, monkeypatch: pytest.MonkeyPatch, metrics_enabled: bool
+    migrated_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    metrics_enabled: bool,
+    provider_enabled: bool,
 ) -> AsyncGenerator[tuple[AsyncClient, list[str]]]:
     monkeypatch.setenv("TEST_API_OPERATOR", OPERATOR)
     monkeypatch.setenv("TEST_API_READER", READER)
@@ -42,8 +50,13 @@ async def api(
     monkeypatch.setattr(
         httpx, "AsyncClient", partial(AsyncClient, transport=httpx.MockTransport(respond))
     )
-    settings = settings_for().model_copy(
+    base = settings_for()
+    settings = base.model_copy(
         update={
+            "providers": {
+                "p": base.providers["p"].model_copy(update={"enabled": provider_enabled})
+            },
+            "prices": base.prices if provider_enabled else (),
             "database_path": migrated_path,
             "spool_path": migrated_path.parent / "api-spool",
             "operator_token_env": "TEST_API_OPERATOR",
@@ -174,14 +187,50 @@ async def test_numeric_money_and_secret_validation_inputs_are_not_accepted_or_ec
     assert set(error_schema.required or ()) <= set(body)
 
 
-@pytest.mark.parametrize("reader", ["too-short", OPERATOR])
+@pytest.mark.parametrize("operator", [False, True], ids=["reader", "operator"])
+@pytest.mark.parametrize(
+    "token",
+    [
+        "too-short",
+        None,
+        "x" * 32 + " ",
+        "x" * 32 + "\n",
+        "x" * 32 + "\t",
+        "x" * 32 + "\x7f",
+        "x" * 32 + "\u00e9",
+    ],
+)
 def test_unsafe_role_credentials_reject_configuration(
-    monkeypatch: pytest.MonkeyPatch, reader: str
+    monkeypatch: pytest.MonkeyPatch, token: str | None, operator: bool
 ) -> None:
     monkeypatch.setenv("TEST_API_OPERATOR", OPERATOR)
-    monkeypatch.setenv("TEST_API_READER", reader)
+    monkeypatch.setenv("TEST_API_READER", READER)
+    monkeypatch.setenv(
+        "TEST_API_OPERATOR" if operator else "TEST_API_READER",
+        token if token is not None else (READER if operator else OPERATOR),
+    )
     settings = settings_for().model_copy(
         update={"operator_token_env": "TEST_API_OPERATOR", "reader_token_env": "TEST_API_READER"}
     )
     with pytest.raises(ConfigurationError):
         create_app(settings)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("provider_enabled", [False])
+@pytest.mark.parametrize("adjustment", [False, True], ids=["read", "adjust"])
+async def test_disabled_provider_budget_operations_are_rejected(
+    api: tuple[AsyncClient, list[str]], adjustment: bool
+) -> None:
+    client, calls = api
+    response = (
+        await client.post(
+            "/api/v1/budgets/adjustments",
+            json={"provider": "p", "amount": "1", "kind": "grant", "reason": "disabled test"},
+        )
+        if adjustment
+        else await client.get("/api/v1/budgets", params={"provider": "p"})
+    )
+    assert response.status_code == 404
+    assert JSON_OBJECT.validate_json(response.content)["error"] == "provider_not_found"
+    assert calls == []

@@ -40,6 +40,8 @@ the token or an asserted user identity.
 | Operator | `POST /api/v1/budgets/adjustments` | `budgets adjust`; audited adjustment to the current period |
 
 Use configured provider names and model **aliases**, not the upstream IDs.
+Budget reads and adjustments require an enabled provider; unknown or disabled
+provider names return `404`.
 Usage filters are `provider`, `model`, `start` (inclusive), `end` (exclusive),
 `limit` (1–500, default 100), and `offset` (0–1,000,000, default 0).
 Timestamps require an ISO 8601 offset or `Z`. CLI options use the same names

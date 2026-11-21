@@ -8,6 +8,7 @@ from pydantic import JsonValue, TypeAdapter
 from test_api import OPERATOR, READER
 from test_api import api as api
 from test_api import metrics_enabled as metrics_enabled
+from test_api import provider_enabled as provider_enabled
 from test_migrations import migrated_path as migrated_path
 
 

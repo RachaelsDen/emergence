@@ -58,6 +58,11 @@ class Authorization:
         self._reader = reader.get_secret_value().encode() if reader else None
         if any(token is not None and len(token) < 32 for token in (self._operator, self._reader)):
             raise ConfigurationError("api_token_too_short")
+        if any(
+            token is not None and any(byte < 33 or byte > 126 for byte in token)
+            for token in (self._operator, self._reader)
+        ):
+            raise ConfigurationError("api_token_invalid")
         if (
             self._operator is not None
             and self._reader is not None
