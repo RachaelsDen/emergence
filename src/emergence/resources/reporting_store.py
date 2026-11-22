@@ -27,6 +27,12 @@ class _ArchiveProjection(SafeModel):
     normalized: tuple[QuotaObservation, ...] = Field(min_length=1)
     raw_pages: list[JsonValue] = Field(exclude=True)
 
+    def index(self) -> dict[tuple[str, str, str], QuotaObservation]:
+        indexed = {(obs.provider, obs.source, obs.resource): obs for obs in self.normalized}
+        if len(indexed) != len(self.normalized):
+            raise SpoolError("report_projection_mismatch")
+        return indexed
+
     @classmethod
     async def load(cls, spool: Spool, reference: ArchiveReference) -> Self | None:
         try:
@@ -255,7 +261,7 @@ class ReportingStore:
 
         results: list[QuotaObservation] = []
         successful: set[tuple[str, str, str]] = set()
-        envelopes: dict[str, _ArchiveProjection | None] = {}
+        envelopes: dict[str, tuple[dict[tuple[str, str, str], QuotaObservation], bool] | None] = {}
         for row in rows:
             # Z.ai's unstable categories share one endpoint health state.
             key = (
@@ -274,14 +280,20 @@ class ReportingStore:
             if archived_detail and record_id is not None:
                 if record_id not in envelopes:
                     reference = ArchiveReference(record_id, row.checksum, row.size_bytes)
-                    envelopes[record_id] = await _ArchiveProjection.load(self.spool, reference)
+                    projection = await _ArchiveProjection.load(self.spool, reference)
+                    envelopes[record_id] = (
+                        (projection.index(), bool(projection.raw_pages))
+                        if projection is not None
+                        else None
+                    )
                 envelope = envelopes[record_id]
             if envelope is not None:
-                matches = [obs for obs in envelope.normalized if obs.resource == row.resource]
-                if len(matches) != 1:
+                indexed, has_raw = envelope
+                match = indexed.get((row.provider_id, row.source, row.resource))
+                if match is None:
                     raise SpoolError("report_projection_mismatch")
-                observation = matches[0].model_copy(
-                    update={"raw_payload_ref": record_id if envelope.raw_pages else None}
+                observation = match.model_copy(
+                    update={"raw_payload_ref": record_id if has_raw else None}
                 )
                 intended = settings.providers[observation.provider]
                 if observation.scope is not None and (

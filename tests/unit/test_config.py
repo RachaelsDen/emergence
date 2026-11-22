@@ -316,6 +316,8 @@ def test_invalid_timezone_rejected() -> None:
         "https://user:password@fixture.invalid",
         "https://fixture.invalid?key=secret",
         "https://fixture.invalid/path#secret",
+        "https://fixture.invalid/v1?",
+        "https://fixture.invalid/v1#",
         "file:///tmp/key",
         "https://fixture.invalid:secret/path",
         "https://fixture.invalid:65536/path",
@@ -363,6 +365,7 @@ def test_invalid_endpoints_cannot_enter_loaded_configuration(
         "http://127.0.0.1:8080/v1",
         "http://[::1]:8080/v1",
         "https://fixture.invalid:65535/path%20segment",
+        "https://fixture.invalid/v1/path%3F%23",
         "https://b\u00fccher.example/\u00e9tude",
     ],
 )
@@ -388,6 +391,21 @@ def test_valid_endpoints_survive_configuration_loading(tmp_path: Path, endpoint:
     provider = load_settings(config).providers["p"]
 
     assert (provider.base_url, provider.quota_url, provider.reporting_base_url) == (endpoint,) * 3
+
+
+@pytest.mark.parametrize(("seconds", "accepted"), [(1, True), (31622400, True), (31622401, False)])
+def test_reporting_freshness_is_bounded(seconds: int, accepted: bool) -> None:
+    values = {
+        "kind": "openai",
+        "quota_policy": "local_limits_only",
+        "base_url": "https://fixture.invalid/v1",
+        "stale_after_seconds": seconds,
+    }
+    if accepted:
+        assert ProviderConfig.model_validate(values).stale_after_seconds == seconds
+    else:
+        with pytest.raises(ValidationError):
+            ProviderConfig.model_validate(values)
 
 
 @pytest.mark.parametrize("opening", ["0", "99.99", "150"])

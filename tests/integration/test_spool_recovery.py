@@ -20,6 +20,32 @@ from emergence.telemetry.logging import Redactor
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("replace", [False, True])
+async def test_lost_live_spool_is_never_recreated(
+    migrated_path: Path, tmp_path: Path, replace: bool
+) -> None:
+    directory = tmp_path / "spool"
+    async with Database(migrated_path) as db:
+        spool = Spool(directory, db, Redactor())
+        await spool.recover()
+        await spool.publish(RecordKey("retained", "fixture"), "unarchived")
+        directory.rename(tmp_path / "missing-spool")
+        if replace:
+            directory.mkdir(mode=0o700)
+
+        # Publication must detect this even when readiness has not run yet.
+        with pytest.raises(SpoolError, match="spool_directory_lost"):
+            await spool.publish(RecordKey("another", "fixture"), "must not appear")
+        assert not await spool.readiness()
+        with pytest.raises(SpoolError, match="spool_directory_lost"):
+            async with spool.capacity_write():
+                pytest.fail("a lost spool must not admit work")
+        assert directory.exists() is replace
+        if replace:
+            assert not tuple(directory.iterdir())
+
+
+@pytest.mark.anyio
 async def test_spool_scan_runs_outside_writer_and_publish_updates_usage(
     migrated_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

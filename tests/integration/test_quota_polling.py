@@ -137,6 +137,36 @@ async def test_reporting_depth_limit_records_unavailable_and_allows_later_poll(
 
 
 @pytest.mark.anyio
+async def test_zai_only_persists_known_categories_and_keeps_raw_evidence(
+    migrated_path: Path,
+) -> None:
+    settings = Settings(providers={"p": config(ProviderKind.ZAI)})
+    reply = httpx.Response(
+        200,
+        json={
+            "data": {
+                "limits": [
+                    {"type": "TOKENS_LIMIT", "percentage": 42},
+                    {"type": "TIME_LIMIT", "percentage": 10},
+                    {"type": "FUTURE_COUNTER", "percentage": 60},
+                ]
+            }
+        },
+    )
+    async with monitor_for(migrated_path, settings, lambda _: reply) as (monitor, db):
+        assert {item.resource for item in await monitor.poll_once("p")} == {
+            "TOKENS_LIMIT",
+            "TIME_LIMIT",
+        }
+        assert {item.resource for item in await monitor.latest()} == {"TOKENS_LIMIT", "TIME_LIMIT"}
+        async with db.session() as session:
+            rows = (await session.execute(select(quota_observations))).all()
+        assert len(rows) == 2
+        raw_record = migrated_path.parent / "report-spool" / rows[0].raw_archive_record_id
+        assert b'"FUTURE_COUNTER"' in raw_record.read_bytes()
+
+
+@pytest.mark.anyio
 async def test_complete_openai_reports_persist_exact_idempotent_deltas(migrated_path: Path) -> None:
     settings = Settings(providers={"o": config(ProviderKind.OPENAI)})
     val = "7.00000000000000000000000000000000000001"

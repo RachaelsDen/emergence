@@ -178,6 +178,7 @@ an older positive snapshot for this policy. It can deny when the provider
 cannot offer fresh capacity. Neither policy turns
 unknown observations into zero or unlimited capacity. Check freshness,
 confidence, scope and available provenance in `/api/v1/resources`.
+`stale_after_seconds` must be between 1 and 31,622,400 seconds (366 days).
 Known USD capacity includes local commitments not covered by its snapshot,
 including an earlier call still in flight when that snapshot was observed.
 
@@ -228,6 +229,9 @@ configuration. Remounting restores verified detail; missing records or checksum
 damage still fail explicitly.
 Reads that need the unavailable archive can fail; queued payloads stay local
 and bounded spool capacity/headroom denies new dispatch under pressure.
+If the live spool directory disappears or is replaced, readiness fails and
+the core refuses to recreate it. Stop the service, restore the matching spool
+and its local-only records, then restart and verify readiness.
 NAS work uses one daemon I/O lane shared with remote reads; pending work is
 bounded and shutdown does not wait for a stalled NAS syscall. The worker
 checks payload size and checksum, syncs the destination file and directory

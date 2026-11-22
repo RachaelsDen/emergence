@@ -12,7 +12,7 @@ from hashlib import sha256
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Final
-from weakref import WeakValueDictionary
+from weakref import WeakValueDictionary, finalize
 
 from anyio import Lock, to_thread
 from pydantic import JsonValue
@@ -40,6 +40,25 @@ class _DirectoryUsage:
     def __init__(self) -> None:
         self.lock = Lock()
         self.snapshot: tuple[_DirectoryVersion, int] | None = None
+        self.identity: tuple[int, int] | None = None
+        self.lost = False
+
+    def bind(self, path: Path, metadata: os.stat_result) -> None:
+        if self.identity is not None:
+            return
+        # Pin the inode so a removed directory cannot be replaced with the
+        # same inode number while the core still owns this spool.
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            pinned = os.fstat(fd)
+            identity = (metadata.st_dev, metadata.st_ino)
+            if (pinned.st_dev, pinned.st_ino) != identity:
+                raise SpoolError("spool_directory_lost")
+        except BaseException:
+            os.close(fd)
+            raise
+        finalize(self, os.close, fd)
+        self.identity = identity
 
 
 _DIRECTORY_USAGE: Final[WeakValueDictionary[Path, _DirectoryUsage]] = WeakValueDictionary()
@@ -305,6 +324,9 @@ class Spool:
             self._usage.snapshot = version, sum(reference.size_bytes for reference in recovered)
 
     def _ensure_directory(self) -> None:
+        if self._usage.identity is not None:
+            self._check_directory()
+            return
         try:
             # Create only the leaf. Provision its local parent before launching.
             self._path.mkdir(mode=0o700)
@@ -313,7 +335,19 @@ class Spool:
         _fsync_directory(self._path.parent)
 
     def _check_directory(self) -> os.stat_result:
-        metadata = self._path.lstat()
+        if self._usage.lost:
+            raise SpoolError("spool_directory_lost")
+        identity = self._usage.identity
+        try:
+            metadata = self._path.lstat()
+        except FileNotFoundError:
+            if identity is None:
+                raise
+            self._usage.lost = True
+            raise SpoolError("spool_directory_lost") from None
+        if identity is not None and identity != (metadata.st_dev, metadata.st_ino):
+            self._usage.lost = True
+            raise SpoolError("spool_directory_lost")
         if metadata.st_uid != os.geteuid() or metadata.st_mode != stat.S_IFDIR | 0o700:
             raise SpoolError("unsafe_spool_directory")
         return metadata
@@ -323,11 +357,10 @@ class Spool:
         return metadata.st_dev, metadata.st_ino, metadata.st_ctime_ns, metadata.st_mtime_ns
 
     def _refresh_usage(self) -> None:
-        try:
-            version = self._directory_version()
-        except FileNotFoundError:
+        if self._usage.identity is None:
             self._ensure_directory()
-            version = self._directory_version()
+            self._usage.bind(self._path, self._check_directory())
+        version = self._directory_version()
         snapshot = self._usage.snapshot
         if snapshot is not None and snapshot[0] == version:
             return
@@ -387,7 +420,7 @@ class Spool:
         return _Record(reference, data)
 
     def _stats(self) -> SpoolStats:
-        self._ensure_directory()
+        self._check_directory()
         total = 0
         records = 0
         for entry in self._path.iterdir():
@@ -433,7 +466,15 @@ class Spool:
     def _scan(
         self, known: tuple[ArchiveReference, ...], archived: set[str]
     ) -> tuple[tuple[ArchiveReference, ...], _DirectoryVersion]:
-        self._ensure_directory()
+        # Startup may provision a new spool only when there is no local-only evidence.
+        try:
+            metadata = self._check_directory()
+        except FileNotFoundError:
+            if any(reference.record_id not in archived for reference in known):
+                raise SpoolError("missing_record") from None
+            self._ensure_directory()
+            metadata = self._check_directory()
+        self._usage.bind(self._path, metadata)
         discovered: dict[str, ArchiveReference] = {}
         stages: list[Path] = []
         for entry in sorted(self._path.iterdir()):

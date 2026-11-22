@@ -134,7 +134,7 @@ class ProviderConfig(SafeModel):
     timeout_seconds: Annotated[float, Field(gt=0, le=300)] = 30
     response_limit_bytes: PositiveInt = 4 * 1024 * 1024
     poll_interval_seconds: Annotated[float, Field(gt=0)] = 300
-    stale_after_seconds: PositiveInt = 900
+    stale_after_seconds: Annotated[int, Field(gt=0, le=366 * 24 * 60 * 60)] = 900
     monthly_budget: Annotated[
         Decimal, Field(ge=MONTHLY_BUDGET_USD, le=MONTHLY_BUDGET_USD, allow_inf_nan=False)
     ] = MONTHLY_BUDGET_USD
@@ -165,8 +165,8 @@ class ProviderConfig(SafeModel):
                     and bool(parsed.hostname)
                     and parsed.username is None
                     and parsed.password is None
-                    and not parsed.query
-                    and not parsed.fragment
+                    and "?" not in endpoint
+                    and "#" not in endpoint
                     and (parsed.port is None or 0 < parsed.port <= 65535)
                 )
             except (httpx.InvalidURL, ValueError):

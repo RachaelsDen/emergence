@@ -20,6 +20,42 @@ from emergence.storage.repositories import ArchiveReference
 
 
 @pytest.mark.anyio
+async def test_inference_archives_exact_decimal_tokens_and_replays_them(
+    migrated_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TEST_E005_INFERENCE", "synthetic-inference-key")
+    content = (
+        b'{"model":"configured-model","choices":[{"message":{"content":"answer"}}],'
+        b'"usage":{"prompt_tokens":5,"completion_tokens":3,"future":0.12345678901234567890},'
+        b'"metadata":[-1.23456789012345678900E+21,42]}'
+    )
+
+    async with gateway_for(
+        migrated_path, settings_for(), lambda _: httpx.Response(200, content=content)
+    ) as (gateway, _, db, spool):
+        result = await gateway.infer(invocation(), "exact")
+        assert result.state is RequestState.COMPLETED and result.result is not None
+        expected_usage = {
+            "prompt_tokens": 5,
+            "completion_tokens": 3,
+            "future": "0.12345678901234567890",
+        }
+        assert result.result.raw_usage == expected_usage
+        record_id = RecordKey(result.request_id, "output").record_id
+        async with db.session() as session:
+            row = (
+                await session.execute(
+                    select(archive_references).where(archive_references.c.record_id == record_id)
+                )
+            ).one()
+        record = await spool.read(ArchiveReference(record_id, row.checksum, row.size_bytes))
+        assert b'"0.12345678901234567890"' in record
+        assert b'["-1.23456789012345678900E+21",42]' in record
+        replay = await gateway.infer(invocation(), "exact")
+        assert replay.replayed and replay.result == result.result
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("defect", "response_model", "wire_usage"),
     [

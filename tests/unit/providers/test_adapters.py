@@ -232,7 +232,14 @@ async def test_usage_schema_drift_retains_an_ambiguous_outcome(
             await Registry(configured(ProviderKind.ZAI), client).get("provider").infer(request())
     assert failure.value.code == "provider_schema_error"
     assert failure.value.ambiguous
-    assert failure.value.raw_response == response
+    evidence_usage = {
+        field: str(value) if isinstance(value, float) else value
+        for field, value in invalid_usage.items()
+    }
+    assert failure.value.raw_response == {
+        **response,
+        "usage": {"prompt_tokens": 0, "completion_tokens": 0, **evidence_usage},
+    }
 
 
 @pytest.mark.anyio

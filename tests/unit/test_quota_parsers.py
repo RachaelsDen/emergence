@@ -14,7 +14,6 @@ def test_zai_retains_only_defensible_percent_and_categories() -> None:
     assert dict(parse_zai(body)) == {
         "TOKENS_LIMIT": Decimal("21.75"),
         "TIME_LIMIT": None,
-        "FUTURE_LIMIT": None,
     }
 
 

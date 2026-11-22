@@ -4,7 +4,7 @@ import json
 
 import httpx
 from anyio import fail_after
-from pydantic import JsonValue, SecretStr, TypeAdapter, ValidationError
+from pydantic import JsonValue, SecretStr, TypeAdapter
 
 from emergence.config import ModelConfig, ProviderConfig, ProviderKind, Settings
 from emergence.inference.schemas import InferenceRequest, InferenceResult, TokenUsage
@@ -20,9 +20,15 @@ class _DuplicateMember(ValueError):
     pass
 
 
-def _check_unique_members(pairs: list[tuple[str, object]]) -> None:
-    if len({key for key, _ in pairs}) != len(pairs):
+def _unique_members(pairs: list[tuple[str, JsonValue]]) -> dict[str, JsonValue]:
+    members = dict(pairs)
+    if len(members) != len(pairs):
         raise _DuplicateMember
+    return members
+
+
+def _reject_nonfinite(_: str) -> None:
+    raise ValueError("nonfinite provider number")
 
 
 class ChatAdapter:
@@ -217,13 +223,18 @@ class ChatAdapter:
                 ambiguous=True,
                 raw_response=self._redactor.text(body.decode("utf-8", errors="replace")),
             ) from None
+        wire: JsonValue = None
         try:
-            # Check the original bounded body before Pydantic collapses
-            # duplicate names. Preserve its numeric parsing for valid objects.
-            json.loads(
-                content, object_pairs_hook=_check_unique_members, parse_int=str, parse_float=str
+            # The JSON archive represents decimal tokens as their exact original text.
+            parsed: JsonValue = json.loads(
+                content,
+                object_pairs_hook=_unique_members,
+                parse_float=str,
+                parse_constant=_reject_nonfinite,
             )
-            raw = self._redactor.value(TypeAdapter(JsonValue).validate_json(content))
+            # Keep actual JSON types for schema validation, not the evidence strings.
+            wire = self._redactor.value(TypeAdapter(JsonValue).validate_json(content))
+            raw = self._redactor.value(parsed)
         except _DuplicateMember:
             # Preserve both members as redacted text, not a collapsed object.
             raise ProviderFailure(
@@ -244,7 +255,9 @@ class ChatAdapter:
                 raw_response=raw,
             )
         try:
-            completion = Completion.model_validate(raw)
+            if not isinstance(raw, dict):
+                raise ValueError("provider response is not a JSON object")
+            completion = Completion.model_validate(wire)
             usage = completion.usage
             normalized = TokenUsage(
                 input_tokens=usage.prompt_tokens if usage else None,
@@ -260,7 +273,7 @@ class ChatAdapter:
                     else None
                 ),
             )
-        except ValidationError:
+        except ValueError:
             raise ProviderFailure(
                 "provider_schema_error", ambiguous=True, raw_response=raw
             ) from None
@@ -269,12 +282,6 @@ class ChatAdapter:
         choice = completion.choices[0]
         if choice.message.tool_calls:
             raise ProviderFailure("unexpected_tool_response", ambiguous=True, raw_response=raw)
-        raw_usage: JsonValue = None
-        match raw:
-            case dict():
-                raw_usage = raw.get("usage")
-            case _:
-                raise ProviderFailure("provider_schema_error", ambiguous=True, raw_response=raw)
         return InferenceResult(
             provider=self.name,
             model=request.model,
@@ -283,6 +290,6 @@ class ChatAdapter:
             content=choice.message.content or "",
             finish_reason=choice.finish_reason,
             usage=normalized,
-            raw_usage=raw_usage,
+            raw_usage=raw.get("usage"),
             raw_response=raw,
         )

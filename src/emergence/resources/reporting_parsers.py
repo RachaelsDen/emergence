@@ -1,7 +1,6 @@
 """Only normalize fields whose meaning is supported by the available evidence."""
 
 import json
-import re
 from collections.abc import Iterator
 from decimal import Decimal, DecimalException
 from typing import Annotated, Final
@@ -13,7 +12,7 @@ from .schemas import ReportingError, ReportingIssue
 type WireValue = str | int | Decimal | bool | None | list[WireValue] | dict[str, WireValue]
 type WireObject = dict[str, WireValue]
 type Counter = Annotated[StrictInt, Field(ge=0)]
-_CATEGORY: Final = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
+_ZAI_CATEGORIES: Final = frozenset({"TOKENS_LIMIT", "TIME_LIMIT"})
 _MAX_JSON_DEPTH: Final = 64
 
 
@@ -79,7 +78,7 @@ class _ZaiLimit(WireModel):
 
 
 def parse_zai(body: WireObject) -> tuple[tuple[str, Decimal | None], ...]:
-    """Retain category names; only TOKENS_LIMIT has documented project evidence of a percent."""
+    """Project only known categories; only TOKENS_LIMIT has evidence of a percent."""
     data = body.get("data")
     limits = data.get("limits") if isinstance(data, dict) else None
     if not isinstance(limits, list):
@@ -87,11 +86,12 @@ def parse_zai(body: WireObject) -> tuple[tuple[str, Decimal | None], ...]:
     results: dict[str, Decimal | None] = {}
     ambiguous: set[str] = set()
     for entry in limits:
+        category = entry.get("type") if isinstance(entry, dict) else None
+        if not isinstance(category, str) or category not in _ZAI_CATEGORIES:
+            continue
         try:
             row = _ZaiLimit.model_validate(entry)
         except ValidationError:
-            continue
-        if not _CATEGORY.fullmatch(row.type):
             continue
         if row.type in results:
             ambiguous.add(row.type)

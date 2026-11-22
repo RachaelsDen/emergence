@@ -44,6 +44,9 @@ the token or an asserted user identity.
 Use configured provider names and model **aliases**, not the upstream IDs.
 Provider names must be a single URL-safe segment: use letters, digits, `-`,
 `_`, `~`, and `.`, with no leading dot.
+In inference `raw_response` and `raw_usage`, fractional or exponent-form JSON
+numbers are preserved as decimal strings to retain their exact digits.
+Normalized token counts remain integers.
 Budget reads and adjustments require an enabled provider; unknown or disabled
 provider names return `404`.
 Usage filters are `provider`, `model`, `start` (inclusive), `end` (exclusive),
