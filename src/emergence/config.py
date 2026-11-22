@@ -87,7 +87,7 @@ class SafeModel(BaseModel):
 
 class ModelConfig(SafeModel):
     id: str
-    max_input_tokens: PositiveInt = 4096
+    max_input_tokens: Annotated[int, Field(gt=0, le=2**63 - 1)] = 4096
     max_output_tokens: PositiveInt = 256
     output_bound_verified: bool = False
     bound_evidence: str | None = None

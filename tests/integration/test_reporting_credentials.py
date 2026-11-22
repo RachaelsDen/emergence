@@ -116,7 +116,9 @@ async def test_subscription_reporting_never_dispatches_openai_admin_values(
     reporting_secret = admin_secret if collision else "synthetic-distinct-subscription-value"
     settings = Settings(
         providers={
-            "other_admin": config(ProviderKind.OPENAI, project="proj_other"),
+            "other_admin": config(
+                ProviderKind.OPENAI, project="proj_other", credential_env="TEST_OTHER_ADMIN_INFER"
+            ),
             "protected_admin": config(
                 ProviderKind.OPENAI,
                 enabled=admin_enabled,
@@ -126,6 +128,7 @@ async def test_subscription_reporting_never_dispatches_openai_admin_values(
             "subscription": config(kind, reporting_credential_env=reporting_env),
         }
     )
+    monkeypatch.setenv("TEST_OTHER_ADMIN_INFER", "synthetic-other-openai-inference")
     monkeypatch.setenv("TEST_PROTECTED_ADMIN", admin_secret)
     monkeypatch.setenv("TEST_PROTECTED_INFERENCE", "synthetic-distinct-openai-inference")
     monkeypatch.setenv(reporting_env or "TEST_E004_INFERENCE", reporting_secret)
@@ -162,3 +165,48 @@ async def test_subscription_reporting_never_dispatches_openai_admin_values(
         assert len(dispatched) == 1
         assert all(item.issue is None for item in (*observations, *persisted))
         assert all(item.status == "experimental" for item in (*observations, *persisted))
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("reporting_env", ["TEST_SUBSCRIPTION_REPORTING", None])
+@pytest.mark.parametrize("other_kind", [ProviderKind.MINIMAX, ProviderKind.ZAI])
+@pytest.mark.parametrize("other_enabled", [True, False])
+async def test_reporting_blocks_other_provider_inference_secret_but_allows_own(
+    migrated_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reporting_env: str | None,
+    other_kind: ProviderKind,
+    other_enabled: bool,
+) -> None:
+    own_secret = "synthetic-own-inference-value"
+    monkeypatch.setenv("TEST_E004_INFERENCE", own_secret)
+    monkeypatch.setenv(reporting_env or "TEST_E004_INFERENCE", own_secret)
+    monkeypatch.setenv("TEST_OTHER_INFERENCE", own_secret)
+    settings = Settings(
+        providers={
+            "subscription": config(ProviderKind.ZAI, reporting_credential_env=reporting_env),
+            "other": config(
+                other_kind, enabled=other_enabled, credential_env="TEST_OTHER_INFERENCE"
+            ),
+        }
+    )
+    dispatched: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        dispatched.append(request.headers["Authorization"])
+        return httpx.Response(
+            200, json={"data": {"limits": [{"type": "TOKENS_LIMIT", "percentage": 37}]}}
+        )
+
+    async with monitor_for(migrated_path, settings, handler) as (monitor, _):
+        (collision,) = await monitor.poll_once("subscription")
+        assert (collision.status, collision.issue) == (
+            "unavailable",
+            ReportingIssue.SHARED_CREDENTIAL,
+        )
+        assert collision.raw_payload_ref is None and dispatched == []
+
+        monkeypatch.setenv("TEST_OTHER_INFERENCE", "synthetic-other-inference-value")
+        (accepted,) = await monitor.poll_once("subscription")
+        assert accepted.status == "experimental" and accepted.issue is None
+        assert dispatched == [f"Bearer {own_secret}"]

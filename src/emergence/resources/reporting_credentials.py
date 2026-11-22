@@ -2,12 +2,13 @@
 
 from datetime import datetime
 
-from emergence.config import ProviderConfig, ProviderKind, Settings
+from emergence.config import ProviderKind, Settings
 
 from .schemas import ReportingError, ReportingIssue
 
 
-def reporting_credential(settings: Settings, config: ProviderConfig, now: datetime) -> str:
+def reporting_credential(settings: Settings, provider_name: str, now: datetime) -> str:
+    config = settings.providers[provider_name]
     if config.reporting_key_expires_at is not None and now >= config.reporting_key_expires_at:
         raise ReportingError(ReportingIssue.EXPIRED_CREDENTIAL)
     name = config.reporting_credential_env
@@ -21,9 +22,11 @@ def reporting_credential(settings: Settings, config: ProviderConfig, now: dateti
         for role in (settings.operator_token_env, settings.reader_token_env)
     ):
         raise ReportingError(ReportingIssue.SHARED_CREDENTIAL)
-    if config.kind is ProviderKind.OPENAI and any(
+    # Subscription reporting may reuse only its own inference key.
+    if any(
         secret == settings.secret(provider.credential_env)
-        for provider in settings.providers.values()
+        for other_name, provider in settings.providers.items()
+        if config.kind is ProviderKind.OPENAI or other_name != provider_name
     ):
         raise ReportingError(ReportingIssue.SHARED_CREDENTIAL)
     if config.kind is not ProviderKind.OPENAI and any(

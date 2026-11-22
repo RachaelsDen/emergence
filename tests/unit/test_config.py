@@ -157,6 +157,22 @@ def test_configured_provider_name_has_the_same_bounds_as_inference(length: int) 
             InferenceRequest.model_validate(request)
 
 
+@pytest.mark.parametrize("limit", [2**63 - 1, 2**63])
+def test_configured_input_bound_fits_sqlite_integer(tmp_path: Path, limit: int) -> None:
+    config = tmp_path / "input-limit.yaml"
+    config.write_text(
+        "providers:\n  local:\n    kind: llamacpp\n    quota_policy: local_limits_only\n"
+        "    base_url: https://fixture.invalid\n    models:\n      m:\n        id: upstream\n"
+        f"        max_input_tokens: {limit}\n",
+        encoding="utf-8",
+    )
+    if limit == 2**63 - 1:
+        assert load_settings(config).providers["local"].models["m"].max_input_tokens == limit
+    else:
+        with pytest.raises(ConfigurationError, match="^configuration_invalid$"):
+            load_settings(config)
+
+
 @pytest.mark.parametrize("explicit", [True, False])
 def test_yaml_environment_overrides_retain_siblings(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, explicit: bool

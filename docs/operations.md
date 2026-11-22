@@ -111,6 +111,10 @@ The examples are candidates, not tested account settings.
   server reachable from the LXC. If it requires a bearer token, set a named
   `credential_env`. Track bounded compute, not a dollar balance.
 
+Z.ai and MiniMax reporting may fall back to their own inference credential.
+Do not reuse an inference credential from another configured provider for
+reporting, even if that provider is disabled.
+
 The example starts at one concurrent request per provider, a 30-second
 deadline, 4096 conservative input units and at most 256 output tokens per
 request. Input admission counts UTF-8 bytes plus configured per-message

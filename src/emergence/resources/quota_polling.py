@@ -148,7 +148,7 @@ class QuotaMonitor:
         assert url is not None  # The unsupported path above has already returned.
         pages: tuple[WireObject, ...] = ()
         try:
-            credential = reporting_credential(self._settings, config, now)
+            credential = reporting_credential(self._settings, name, now)
             raw, _ = await http.get(url, headers={"Authorization": f"Bearer {credential}"})
             pages = (raw,)
             redactor = Redactor(self._settings.secrets())
@@ -190,7 +190,7 @@ class QuotaMonitor:
     ) -> tuple[QuotaObservation, ...]:
         redactor = Redactor(self._settings.secrets())
         try:
-            credential = reporting_credential(self._settings, config, now)
+            credential = reporting_credential(self._settings, name, now)
             org, project = config.organization, config.project
             if (
                 not org
