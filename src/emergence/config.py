@@ -18,6 +18,7 @@ from pydantic import (
     Field,
     SecretStr,
     ValidationError,
+    field_validator,
     model_validator,
 )
 from pydantic_core import PydanticCustomError
@@ -28,7 +29,9 @@ from yaml.nodes import MappingNode, ScalarNode
 type PositiveInt = Annotated[int, Field(gt=0)]
 type EnvName = Annotated[str, Field(pattern=r"^[A-Z][A-Z0-9_]*$")]
 ModelAlias = Annotated[str, Field(min_length=1, max_length=128)]
-ProviderName = Annotated[str, Field(min_length=1, max_length=128)]
+ProviderName = Annotated[
+    str, Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_~-][A-Za-z0-9._~-]*$")
+]
 MONTHLY_BUDGET_USD: Final = Decimal("100")
 
 
@@ -96,6 +99,21 @@ class ModelConfig(SafeModel):
     input_overhead_tokens: Annotated[int, Field(ge=0)] = 512
     reasoning_in_output_bound_verified: bool = False
     reasoning_bound_evidence: str | None = None
+
+    @field_validator("bound_evidence", "input_bound_evidence", "reasoning_bound_evidence")
+    @classmethod
+    def strip_bound_evidence(cls, evidence: str | None) -> str | None:
+        return evidence.strip() if evidence is not None else None
+
+    @model_validator(mode="after")
+    def validate_bound_evidence(self) -> Self:
+        if (
+            (self.output_bound_verified and not self.bound_evidence)
+            or (self.input_bound_verified and not self.input_bound_evidence)
+            or (self.reasoning_in_output_bound_verified and not self.reasoning_bound_evidence)
+        ):
+            raise PydanticCustomError("bound_evidence", "verified bounds require nonblank evidence")
+        return self
 
 
 class ProviderConfig(SafeModel):
@@ -175,10 +193,10 @@ class PriceConfig(SafeModel):
     model: str
     effective_at: AwareDatetime
     input_per_million: Annotated[
-        Decimal, Field(ge=0, le=1000000, max_digits=24, decimal_places=12, allow_inf_nan=False)
+        Decimal, Field(gt=0, le=1000000, max_digits=24, decimal_places=12, allow_inf_nan=False)
     ]
     output_per_million: Annotated[
-        Decimal, Field(ge=0, le=1000000, max_digits=24, decimal_places=12, allow_inf_nan=False)
+        Decimal, Field(gt=0, le=1000000, max_digits=24, decimal_places=12, allow_inf_nan=False)
     ]
     cached_input_per_million: Annotated[
         Decimal | None,

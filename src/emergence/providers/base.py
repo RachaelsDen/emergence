@@ -44,23 +44,27 @@ class ChatAdapter:
 
     def features(self, model: ModelConfig) -> tuple[FeatureBound, ...]:
         """Declare token overlap and which provider limits have supporting evidence."""
+        input_bounded = model.input_bound_verified and bool(
+            (model.input_bound_evidence or "").strip()
+        )
+        output_bounded = model.output_bound_verified and bool((model.bound_evidence or "").strip())
         reasoning_bounded = (
-            model.output_bound_verified
+            output_bounded
             and model.reasoning_in_output_bound_verified
-            and bool(model.reasoning_bound_evidence)
+            and bool((model.reasoning_bound_evidence or "").strip())
         )
         return (
             FeatureBound(
                 dimension="input",
                 unit="token",
-                bounded=model.input_bound_verified and bool(model.input_bound_evidence),
+                bounded=input_bounded,
                 mechanism="UTF-8 byte bound plus verified per-message protocol overhead",
                 evidence=model.input_bound_evidence,
             ),
             FeatureBound(
                 dimension="cached_input",
                 unit="token",
-                bounded=model.input_bound_verified and bool(model.input_bound_evidence),
+                bounded=input_bounded,
                 mechanism="reserve all input at uncached price; cache count overlaps input",
                 evidence=model.input_bound_evidence,
                 included_in="input",
@@ -68,7 +72,7 @@ class ChatAdapter:
             FeatureBound(
                 dimension="output",
                 unit="token",
-                bounded=model.output_bound_verified and bool(model.bound_evidence),
+                bounded=output_bounded,
                 mechanism=self.output_parameter,
                 evidence=model.bound_evidence,
             ),

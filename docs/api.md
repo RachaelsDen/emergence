@@ -42,6 +42,8 @@ the token or an asserted user identity.
 | Operator | `POST /api/v1/budgets/adjustments` | `budgets adjust`; audited adjustment to the current period |
 
 Use configured provider names and model **aliases**, not the upstream IDs.
+Provider names must be a single URL-safe segment: use letters, digits, `-`,
+`_`, `~`, and `.`, with no leading dot.
 Budget reads and adjustments require an enabled provider; unknown or disabled
 provider names return `404`.
 Usage filters are `provider`, `model`, `start` (inclusive), `end` (exclusive),

@@ -1,4 +1,6 @@
 import json
+import os
+import stat
 from hashlib import sha256
 from pathlib import Path
 from threading import Event
@@ -58,7 +60,54 @@ async def test_spool_scan_runs_outside_writer_and_publish_updates_usage(
 
         (directory / ".stage-incomplete").unlink()
         await spool.publish(RecordKey("second", "fixture"), "small")
-        assert scans == 2
+    assert scans == 2
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("sync_directory", [False, True])
+async def test_publication_fsync_does_not_hold_writer_and_precedes_reference(
+    migrated_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sync_directory: bool
+) -> None:
+    entered, release = Event(), Event()
+    directory = tmp_path / "spool"
+    key = RecordKey("record", "fixture")
+    path = directory / key.record_id
+    async with Database(migrated_path) as db:
+        spool = Spool(directory, db, Redactor())
+        await spool.recover()
+        fsync = os.fsync
+
+        def pause(fd: int) -> None:
+            metadata = os.fstat(fd)
+            should_pause = (
+                metadata.st_ino == directory.stat().st_ino and path.exists()
+                if sync_directory
+                else stat.S_ISREG(metadata.st_mode)
+            )
+            if should_pause and not entered.is_set():
+                entered.set()
+                if not release.wait(4):
+                    raise AssertionError("publication was not released")
+            fsync(fd)
+
+        async def publish() -> None:
+            await spool.publish(key, "durable only after fsync")
+
+        monkeypatch.setattr(os, "fsync", pause)
+        with fail_after(5):
+            async with create_task_group() as tasks:
+                tasks.start_soon(publish)
+                try:
+                    assert await to_thread.run_sync(entered.wait, 2)
+                    async with db.write() as session:
+                        assert await list_archive_references(session) == ()
+                        await session.execute(text("INSERT INTO providers VALUES ('p', 'zai')"))
+                finally:
+                    release.set()
+        async with db.session() as session:
+            (reference,) = await list_archive_references(session)
+        assert reference.record_id == key.record_id
+        assert (await spool.read(reference)).endswith(b'"durable only after fsync"')
 
 
 @pytest.mark.anyio

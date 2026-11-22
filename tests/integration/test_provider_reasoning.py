@@ -29,7 +29,7 @@ from emergence.storage.models import request_reservations, requests
 @pytest.mark.parametrize("enforce_budgets", [True, False], ids=["enforced", "shadow"])
 @pytest.mark.parametrize(
     ("verified", "evidence"),
-    [(False, "synthetic contract"), (True, None), (True, "")],
+    [(False, "synthetic contract"), (True, None), (True, ""), (True, " \t\n")],
 )
 async def test_unverified_reasoning_rejects_before_admission(
     migrated_path: Path,

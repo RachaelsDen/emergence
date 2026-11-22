@@ -1,8 +1,8 @@
 """Shared chat-completion wire schemas, separate from normalized usage."""
 
-from typing import Annotated
+from typing import Annotated, Self
 
-from pydantic import BaseModel, Field, JsonValue
+from pydantic import BaseModel, Field, JsonValue, model_validator
 
 from emergence.inference.schemas import TokenCount
 
@@ -21,6 +21,17 @@ class _Usage(BaseModel):
     total_tokens: TokenCount | None = None
     prompt_tokens_details: _PromptDetails | None = None
     completion_tokens_details: _CompletionDetails | None = None
+
+    @model_validator(mode="after")
+    def validate_total_tokens(self) -> Self:
+        if (
+            self.total_tokens is not None
+            and self.prompt_tokens is not None
+            and self.completion_tokens is not None
+            and self.total_tokens != self.prompt_tokens + self.completion_tokens
+        ):
+            raise ValueError("total tokens do not match prompt and completion tokens")
+        return self
 
 
 class _ResponseMessage(BaseModel):

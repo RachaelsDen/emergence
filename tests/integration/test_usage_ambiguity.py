@@ -53,6 +53,11 @@ from emergence.storage.repositories import ArchiveReference
             "configured-model",
             {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 2**63},
         ),
+        (
+            "usage",
+            "configured-model",
+            {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 1},
+        ),
     ],
 )
 async def test_invalid_wire_response_preserves_hold_and_replays_without_dispatch(

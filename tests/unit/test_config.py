@@ -8,6 +8,8 @@ from pydantic import ValidationError
 
 from emergence.config import (
     ConfigurationError,
+    ModelConfig,
+    PriceConfig,
     ProviderConfig,
     ProviderKind,
     QuotaPolicy,
@@ -171,6 +173,64 @@ def test_configured_input_bound_fits_sqlite_integer(tmp_path: Path, limit: int) 
     else:
         with pytest.raises(ConfigurationError, match="^configuration_invalid$"):
             load_settings(config)
+
+
+@pytest.mark.parametrize("name", ["team/vendor", "p%2Fq", ".", "..", "p q", "p?", "p#", "p\\q"])
+def test_provider_name_must_fit_in_recovery_url_segment(name: str) -> None:
+    with pytest.raises(ValidationError):
+        Settings.model_validate(
+            {
+                "providers": {
+                    name: {
+                        "kind": "zai",
+                        "quota_policy": "local_limits_only",
+                        "base_url": "https://fixture.invalid",
+                    }
+                }
+            }
+        )
+    with pytest.raises(ValidationError):
+        InferenceRequest(provider=name, model="m", messages=(Message(role="user", content="x"),))
+    request = InferenceRequest(
+        provider="team_vendor.eu-1~a", model="m", messages=(Message(role="user", content="x"),)
+    )
+    assert request.provider == "team_vendor.eu-1~a"
+
+
+@pytest.mark.parametrize(
+    ("flag", "field"),
+    [
+        ("input_bound_verified", "input_bound_evidence"),
+        ("output_bound_verified", "bound_evidence"),
+        ("reasoning_in_output_bound_verified", "reasoning_bound_evidence"),
+    ],
+)
+def test_verified_bounds_require_nonblank_evidence(flag: str, field: str) -> None:
+    for invalid in (None, "", " \t\n\u2003"):
+        with pytest.raises(ValidationError, match="verified bounds require nonblank evidence"):
+            ModelConfig.model_validate({"id": "fixture", flag: True, field: invalid})
+    model = ModelConfig.model_validate({"id": "fixture", flag: True, field: "  verified limit \n"})
+    assert model.model_dump()[field] == "verified limit"
+
+
+@pytest.mark.parametrize(("input_rate", "output_rate"), [(0, 0), (0, 1), (1, 0)])
+def test_cloud_price_requires_positive_input_and_output_rates(
+    input_rate: int, output_rate: int
+) -> None:
+    values = {
+        "version": "v1",
+        "provider": "p",
+        "model": "m",
+        "source": "synthetic tariff",
+        "effective_at": "2026-01-01T00:00:00Z",
+        "input_per_million": input_rate,
+        "output_per_million": output_rate,
+        "cached_input_per_million": 0,
+    }
+    with pytest.raises(ValidationError, match="greater than 0"):
+        PriceConfig.model_validate(values)
+    values.update(input_per_million=1, output_per_million=1)
+    assert PriceConfig.model_validate(values).cached_input_per_million == 0
 
 
 @pytest.mark.parametrize("explicit", [True, False])

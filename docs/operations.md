@@ -132,7 +132,8 @@ quoted decimal `input_per_million` and `output_per_million` rates in USD per
 **million** tokens. Supply `cached_input_per_million` only if applicable and
 sourced; unknown cache usage is charged at the input rate. For coding plans,
 use the verified equivalent PAYG rates for **simulated** charges, not a
-pretended subscription balance. Do not use dummy or zero rates as a bypass.
+pretended subscription balance. Input and output rates must be positive;
+a documented cached-input rate may be zero. Do not use dummy rates.
 Append a version when rates change; preserve historical definitions.
 Missing effective rates are not an estimate of zero spend.
 

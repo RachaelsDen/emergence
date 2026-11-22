@@ -15,20 +15,20 @@ def test_wire_and_normalized_usage_accept_storage_boundaries(count: int) -> None
             "choices": [{"message": {"content": "schema only"}}],
             "usage": {
                 "prompt_tokens": count,
-                "completion_tokens": count,
+                "completion_tokens": 0,
                 "total_tokens": count,
                 "prompt_tokens_details": {"cached_tokens": count},
-                "completion_tokens_details": {"reasoning_tokens": count},
+                "completion_tokens_details": {"reasoning_tokens": 0},
             },
         }
     )
     assert completion.usage is not None
     assert completion.usage.model_dump() == {
         "prompt_tokens": count,
-        "completion_tokens": count,
+        "completion_tokens": 0,
         "total_tokens": count,
         "prompt_tokens_details": {"cached_tokens": count},
-        "completion_tokens_details": {"reasoning_tokens": count},
+        "completion_tokens_details": {"reasoning_tokens": 0},
     }
     normalized = TokenUsage(
         input_tokens=count,
@@ -43,6 +43,23 @@ def test_wire_and_normalized_usage_accept_storage_boundaries(count: int) -> None
         "cached_input_tokens": count,
         "reasoning_tokens": count,
     }
+
+
+def test_wire_usage_can_omit_components_or_total() -> None:
+    for usage in (
+        {"total_tokens": 8, "prompt_tokens": 5},
+        {"prompt_tokens": 5, "completion_tokens": 3},
+        {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
+    ):
+        completion = Completion.model_validate(
+            {
+                "model": "configured-model",
+                "choices": [{"message": {"content": "schema only"}}],
+                "usage": usage,
+            }
+        )
+        assert completion.usage is not None
+        assert completion.usage.model_dump(exclude_none=True) == usage
 
 
 @pytest.mark.parametrize(

@@ -159,12 +159,16 @@ class Spool:
         return os.access(self._path, os.R_OK | os.W_OK | os.X_OK, effective_ids=True)
 
     @asynccontextmanager
-    async def capacity_write(self) -> AsyncGenerator[AsyncSession]:
-        """Refresh the usage cache before taking the SQLite writer."""
+    async def _capacity_guard(self) -> AsyncGenerator[None]:
         async with self._usage.lock:
             await to_thread.run_sync(self._refresh_usage)
-            async with self._db.write() as session:
-                yield session
+            yield
+
+    @asynccontextmanager
+    async def capacity_write(self) -> AsyncGenerator[AsyncSession]:
+        """Refresh the usage cache before taking the SQLite writer."""
+        async with self._capacity_guard(), self._db.write() as session:
+            yield session
 
     async def ensure_capacity(
         self,
@@ -175,7 +179,7 @@ class Spool:
         record_id: str | None = None,
         record_size: int = 0,
     ) -> None:
-        """Check bytes and disk headroom under the caller's SQLite write lock."""
+        """Check current claims and disk usage while holding the spool guard."""
         claims = await live_claims(session)
         if any(claim.remaining_bytes < 0 for claim in claims):
             raise SpoolError("spool_claim_exceeded")
@@ -200,14 +204,27 @@ class Spool:
         """Redact and durably publish an immutable JSON record, then commit its reference."""
         record = self._prepare(key, payload)
         reference = record.reference
-        async with self.capacity_write() as session:
-            existing = (
-                await session.execute(
-                    select(archive_references).where(
-                        archive_references.c.record_id == reference.record_id
+        # Admissions, reclamation, and other publications use the same guard.
+        # They cannot spend this capacity between the check and reference commit.
+        async with self._capacity_guard():
+            present = False
+            async with self._db.session() as session:
+                existing = (
+                    await session.execute(
+                        select(archive_references).where(
+                            archive_references.c.record_id == reference.record_id
+                        )
                     )
-                )
-            ).one_or_none()
+                ).one_or_none()
+                if existing is None:
+                    present = await to_thread.run_sync((self._path / reference.record_id).exists)
+                    await self.ensure_capacity(
+                        session,
+                        0 if present else reference.size_bytes,
+                        claim_request_id=claim_request_id,
+                        record_id=reference.record_id,
+                        record_size=reference.size_bytes,
+                    )
             if existing is not None:
                 if (existing.checksum, existing.size_bytes) != (
                     reference.checksum,
@@ -217,21 +234,16 @@ class Spool:
                 try:
                     await self.read_local(reference)
                 except SpoolError as error:
-                    # A regenerated identical record (notably startup configuration)
-                    # already has a durable acknowledgement. Never consult NAS here.
-                    if error.code != "missing_record" or not await _archived(session, reference):
+                    # An identical record may already have been delivered and reclaimed.
+                    if error.code != "missing_record":
                         raise
+                    async with self._db.session() as session:
+                        if not await _archived(session, reference):
+                            raise
             else:
-                present = await to_thread.run_sync((self._path / reference.record_id).exists)
-                await self.ensure_capacity(
-                    session,
-                    0 if present else reference.size_bytes,
-                    claim_request_id=claim_request_id,
-                    record_id=reference.record_id,
-                    record_size=reference.size_bytes,
-                )
                 await to_thread.run_sync(self._publish_counted, record, present)
-            await register_archive_reference(session, reference)
+            async with self._db.write() as session:
+                await register_archive_reference(session, reference)
         return reference
 
     async def read(self, reference: ArchiveReference) -> bytes:
