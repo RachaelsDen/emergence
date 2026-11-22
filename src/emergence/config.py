@@ -1,0 +1,291 @@
+"""Non-secret configuration; credential values live exclusively in the environment."""
+
+import os
+from collections.abc import Hashable
+from decimal import Decimal
+from enum import StrEnum
+from pathlib import Path
+from typing import Annotated, Final, Self
+from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+import httpx
+import yaml
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
+from pydantic_core import PydanticCustomError
+from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
+from yaml.constructor import ConstructorError
+from yaml.nodes import MappingNode, ScalarNode
+
+type PositiveInt = Annotated[int, Field(gt=0)]
+type EnvName = Annotated[str, Field(pattern=r"^[A-Z][A-Z0-9_]*$")]
+ModelAlias = Annotated[str, Field(min_length=1, max_length=128)]
+ProviderName = Annotated[
+    str, Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_~-][A-Za-z0-9._~-]*$")
+]
+MONTHLY_BUDGET_USD: Final = Decimal("100")
+
+
+class _UniqueKeyLoader(yaml.SafeLoader):
+    """Reject repeated explicit keys while preserving YAML merge precedence."""
+
+    def __init__(self, stream: str) -> None:
+        super().__init__(stream)
+        self._checked: set[MappingNode] = set()
+
+    def flatten_mapping(self, node: MappingNode) -> None:
+        if node not in self._checked:
+            self._checked.add(node)
+            seen: set[Hashable] = set()
+            merge_key = object()
+            for key_node, _ in node.value:
+                key: object
+                if key_node.tag == "tag:yaml.org,2002:merge":
+                    key = merge_key
+                elif isinstance(key_node, ScalarNode) and key_node.tag == "tag:yaml.org,2002:value":
+                    key = key_node.value
+                else:
+                    # PyYAML's stub does not annotate the node parameter.
+                    key = self.construct_object(key_node)  # pyright: ignore[reportUnknownMemberType]
+                if not isinstance(key, Hashable) or key in seen:
+                    raise ConstructorError(
+                        None, None, "duplicate or unhashable mapping key", key_node.start_mark
+                    )
+                seen.add(key)
+        super().flatten_mapping(node)
+
+
+class ConfigurationError(Exception):
+    """A configuration failure whose input must not be serialized."""
+
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(code)
+
+
+class ProviderKind(StrEnum):
+    ZAI = "zai"
+    MINIMAX = "minimax"
+    OPENAI = "openai"
+    LLAMACPP = "llamacpp"
+
+
+class QuotaPolicy(StrEnum):
+    REQUIRE_FRESH = "require_fresh"
+    LOCAL_LIMITS_ONLY = "local_limits_only"
+
+
+class SafeModel(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
+
+
+class ModelConfig(SafeModel):
+    id: str
+    max_input_tokens: Annotated[int, Field(gt=0, le=2**63 - 1)] = 4096
+    max_output_tokens: PositiveInt = 256
+    output_bound_verified: bool = False
+    bound_evidence: str | None = None
+    input_bound_verified: bool = False
+    input_bound_evidence: str | None = None
+    input_overhead_tokens: Annotated[int, Field(ge=0)] = 512
+    reasoning_in_output_bound_verified: bool = False
+    reasoning_bound_evidence: str | None = None
+
+    @field_validator("bound_evidence", "input_bound_evidence", "reasoning_bound_evidence")
+    @classmethod
+    def strip_bound_evidence(cls, evidence: str | None) -> str | None:
+        return evidence.strip() if evidence is not None else None
+
+    @model_validator(mode="after")
+    def validate_bound_evidence(self) -> Self:
+        if (
+            (self.output_bound_verified and not self.bound_evidence)
+            or (self.input_bound_verified and not self.input_bound_evidence)
+            or (self.reasoning_in_output_bound_verified and not self.reasoning_bound_evidence)
+        ):
+            raise PydanticCustomError("bound_evidence", "verified bounds require nonblank evidence")
+        return self
+
+
+class ProviderConfig(SafeModel):
+    kind: ProviderKind
+    enabled: bool = True
+    quota_policy: QuotaPolicy
+    base_url: str
+    models: dict[ModelAlias, ModelConfig] = Field(default_factory=dict)
+    credential_env: EnvName | None = None
+    reporting_credential_env: EnvName | None = None
+    quota_url: str | None = None
+    reporting_base_url: str = "https://api.openai.com/v1"
+    reporting_key_expires_at: AwareDatetime | None = None
+    reporting_lookback_days: Annotated[int, Field(gt=0, le=366)] = 31
+    organization: str | None = None
+    project: str | None = None
+    concurrency: PositiveInt = 1
+    timeout_seconds: Annotated[float, Field(gt=0, le=300)] = 30
+    response_limit_bytes: PositiveInt = 4 * 1024 * 1024
+    poll_interval_seconds: Annotated[float, Field(gt=0)] = 300
+    stale_after_seconds: Annotated[int, Field(gt=0, le=366 * 24 * 60 * 60)] = 900
+    monthly_budget: Annotated[
+        Decimal, Field(ge=MONTHLY_BUDGET_USD, le=MONTHLY_BUDGET_USD, allow_inf_nan=False)
+    ] = MONTHLY_BUDGET_USD
+    safety_limit: Annotated[Decimal, Field(gt=0, allow_inf_nan=False)] = Decimal("95")
+    safety_limit_confirmed: bool = False
+
+    @property
+    def inference_url(self) -> str:
+        return f"{self.base_url.rstrip('/')}/chat/completions"
+
+    @model_validator(mode="after")
+    def validate_endpoints(self) -> Self:
+        """Credentials belong in secret sources, never in persisted endpoint URLs."""
+        for endpoint in (
+            self.base_url,
+            self.inference_url,
+            self.quota_url,
+            self.reporting_base_url,
+        ):
+            if endpoint is None:
+                continue
+            try:
+                transport_url = httpx.URL(endpoint)
+                parsed = urlsplit(endpoint)
+                valid = (
+                    transport_url.is_absolute_url
+                    and parsed.scheme in {"http", "https"}
+                    and bool(parsed.hostname)
+                    and parsed.username is None
+                    and parsed.password is None
+                    and "?" not in endpoint
+                    and "#" not in endpoint
+                    and (parsed.port is None or 0 < parsed.port <= 65535)
+                )
+            except (httpx.InvalidURL, ValueError):
+                valid = False
+            if not valid:
+                raise PydanticCustomError("endpoint", "endpoint must be a credential-free HTTP URL")
+        return self
+
+    @model_validator(mode="after")
+    def validate_openai_scope(self) -> Self:
+        if self.kind is ProviderKind.OPENAI and any(
+            value is not None and (not value or any(not "!" <= char <= "~" for char in value))
+            for value in (self.organization, self.project)
+        ):
+            raise PydanticCustomError("openai_scope", "OpenAI scope must be visible ASCII")
+        return self
+
+
+class PriceConfig(SafeModel):
+    """Operator-sourced price versions; amounts are USD per million tokens."""
+
+    version: Annotated[str, Field(min_length=1, max_length=128)]
+    provider: str
+    model: str
+    effective_at: AwareDatetime
+    input_per_million: Annotated[
+        Decimal, Field(gt=0, le=1000000, max_digits=24, decimal_places=12, allow_inf_nan=False)
+    ]
+    output_per_million: Annotated[
+        Decimal, Field(gt=0, le=1000000, max_digits=24, decimal_places=12, allow_inf_nan=False)
+    ]
+    cached_input_per_million: Annotated[
+        Decimal | None,
+        Field(ge=0, le=1000000, max_digits=24, decimal_places=12, allow_inf_nan=False),
+    ] = None
+    source: Annotated[str, Field(min_length=1)]
+
+    @model_validator(mode="after")
+    def validate_cache_discount(self) -> Self:
+        if (
+            self.cached_input_per_million is not None
+            and self.cached_input_per_million > self.input_per_million
+        ):
+            raise PydanticCustomError("cache_price", "cache surcharges are not a bounded discount")
+        return self
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_prefix="EMERGENCE_",
+        env_nested_delimiter="__",
+        extra="forbid",
+        frozen=True,
+        hide_input_in_errors=True,
+    )
+
+    host: str = "127.0.0.1"
+    port: Annotated[int, Field(ge=1, le=65535)] = 8000
+    database_path: Path = Path("var/core.sqlite3")
+    spool_path: Path = Path("var/spool")
+    archive_path: Path | None = None
+    archive_mount_path: Path | None = None
+    accounting_timezone: str = "UTC"
+    operator_token_env: EnvName = "EMERGENCE_OPERATOR_TOKEN"
+    reader_token_env: EnvName = "EMERGENCE_READER_TOKEN"
+    providers: dict[ProviderName, ProviderConfig] = Field(default_factory=dict)
+    prices: tuple[PriceConfig, ...] = ()
+    metrics_enabled: bool = False
+    spool_limit_bytes: PositiveInt = 256 * 1024 * 1024
+    disk_headroom_bytes: PositiveInt = 64 * 1024 * 1024
+    request_limit_bytes: PositiveInt = 1024 * 1024
+    request_body_timeout_seconds: Annotated[float, Field(gt=0, le=300)] = 10
+    requests_per_minute: PositiveInt = 30
+    poll_concurrency: PositiveInt = 4
+    enforce_budgets: bool = True
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        """Environment overrides constructor/YAML values, with nested sibling merging."""
+        return env_settings, init_settings
+
+    @model_validator(mode="after")
+    def validate_timezone(self) -> Self:
+        try:
+            ZoneInfo(self.accounting_timezone)
+        except ZoneInfoNotFoundError:
+            raise PydanticCustomError("timezone", "unknown accounting timezone") from None
+        return self
+
+    def secret(self, name: str | None) -> SecretStr | None:
+        value = os.environ.get(name) if name is not None else None
+        return SecretStr(value) if value else None
+
+    def secrets(self) -> tuple[str, ...]:
+        names = {self.operator_token_env, self.reader_token_env}
+        for provider in self.providers.values():
+            if provider.credential_env:
+                names.add(provider.credential_env)
+            if provider.reporting_credential_env:
+                names.add(provider.reporting_credential_env)
+        return tuple(os.environ[name] for name in names if os.environ.get(name))
+
+
+def load_settings(path: Path | None = None) -> Settings:
+    """Parse a non-secret YAML file and environment overrides without leaking inputs."""
+    selected = path or (
+        Path(os.environ["EMERGENCE_CONFIG"]) if os.environ.get("EMERGENCE_CONFIG") else None
+    )
+    try:
+        if selected is None:
+            return Settings()
+        parsed = yaml.load(selected.read_text(encoding="utf-8"), Loader=_UniqueKeyLoader)
+        return Settings.model_validate(parsed)
+    except (OSError, UnicodeDecodeError, yaml.YAMLError, ValidationError):
+        raise ConfigurationError("configuration_invalid") from None
